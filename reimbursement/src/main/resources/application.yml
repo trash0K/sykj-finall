@@ -1,0 +1,28 @@
+# 服务器配置
+server:
+  port: 8080  # 项目启动端口
+spring:
+  application:
+    name: reimbursement
+
+  # 数据库配置（适配Spring Boot3.x + MySQL8.0）
+  datasource:
+    driver-class-name: com.mysql.cj.jdbc.Driver  # 驱动类名不变，但依赖坐标已改
+    url: jdbc:mysql://localhost:3306/sykj_reim?useUnicode=true&characterEncoding=utf8&useSSL=false&serverTimezone=GMT%2B8&allowPublicKeyRetrieval=true
+    username: root  # 你的MySQL用户名
+    password: 123456  # 你的MySQL密码
+
+#Mybatis-Plus配置（适配Spring Boot3.x）
+mybatis-plus:
+  mapper-locations: classpath*:/mapper/**/*.xml
+  type-aliases-package: com.example.demo.entity
+  global-config:
+    db-config:
+      id-type: auto
+      logic-delete-field: deleted
+      logic-delete-value: 1
+      logic-not-delete-value: 0
+  configuration:
+    map-underscore-to-camel-case: true
+    cache-enabled: false
+

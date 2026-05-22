@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.kjd.reimbursement.mapper.FkReimMainMapper">
+    <resultMap id="BaseResultMap" type="com.kjd.reimbursement.pojo.entity.FkReimMain">
+        <id column="id" property="id"/>
+        <result column="creation_time" property="creationTime"/>
+        <result column="reimbursement_title" property="reimbursementTitle"/>
+        <result column="reimburser_id" property="reimburserId"/>
+        <result column="reimburser_no" property="reimburserNo"/>
+        <result column="reimburser_name" property="reimburserName"/>
+        <result column="reim_department_id" property="reimDepartmentId"/>
+        <result column="reim_department_no" property="reimDepartmentNo"/>
+        <result column="reim_department_name" property="reimDepartmentName"/>
+        <result column="reim_company_id" property="reimCompanyId"/>
+        <result column="reim_company_no" property="reimCompanyNo"/>
+        <result column="reim_company_name" property="reimCompanyName"/>
+        <result column="business_type_id" property="businessTypeId"/>
+        <result column="business_type_no" property="businessTypeNo"/>
+        <result column="business_type_name" property="businessTypeName"/>
+        <result column="business_trip_reason" property="businessTripReason"/>
+        <result column="subsidy_total" property="subsidyTotal"/>
+        <result column="meal_allowance" property="mealAllowance"/>
+        <result column="transportation_allowance" property="transportationAllowance"/>
+        <result column="phone_allowance" property="phoneAllowance"/>
+        <result column="remarks" property="remarks"/>
+    </resultMap>
+</mapper>

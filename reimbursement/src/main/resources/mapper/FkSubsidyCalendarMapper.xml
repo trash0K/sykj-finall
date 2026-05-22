@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.kjd.reimbursement.mapper.FkSubsidyCalendarMapper">
+    <resultMap id="BaseResultMap" type="com.kjd.reimbursement.pojo.entity.FkSubsidyCalendar">
+        <id column="id" property="id"/>
+        <result column="main_id" property="mainId"/>
+        <result column="travel_date" property="travelDate"/>
+        <result column="travel_date_week" property="travelDateWeek"/>
+        <result column="subsidized_cities" property="subsidizedCities"/>
+        <result column="subsidized_city_number" property="subsidizedCityNumber"/>
+        <result column="remark" property="remark"/>
+        <result column="standard_meal_expenses_amount" property="standardMealExpensesAmount"/>
+        <result column="standard_traffic_amount" property="standardTrafficAmount"/>
+        <result column="standard_communication_amount" property="standardCommunicationAmount"/>
+        <result column="meal_expenses_amount" property="mealExpensesAmount"/>
+        <result column="traffic_amount" property="trafficAmount"/>
+        <result column="communication_amount" property="communicationAmount"/>
+        <result column="is_reimbursed" property="isReimbursed"/>
+    </resultMap>
+</mapper>
