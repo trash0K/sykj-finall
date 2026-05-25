@@ -11,7 +11,7 @@ import java.io.Serializable;
 @TableName("fk_reim_main")
 public class FkReimMain implements Serializable {
 
-    @TableId(type = IdType.ASSIGN_UUID)
+    @TableId(type = IdType.INPUT)
     private String id;//报销单号
 
     private String creationTime;//创建时间

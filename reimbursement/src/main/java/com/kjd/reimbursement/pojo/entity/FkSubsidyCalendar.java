@@ -11,7 +11,7 @@ import java.io.Serializable;
 @TableName("fk_subsidy_calendar")
 public class FkSubsidyCalendar implements Serializable {
 
-    @TableId(type = IdType.ASSIGN_UUID)
+    @TableId(type = IdType.INPUT)
     private String id;
 
     private String mainId;

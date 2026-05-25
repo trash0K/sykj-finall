@@ -12,6 +12,7 @@ import com.kjd.reimbursement.service.FkReimItineraryService;
 import com.kjd.reimbursement.service.FkReimMainService;
 import com.kjd.reimbursement.service.FkReimSubsidyService;
 import com.kjd.reimbursement.service.FkSubsidyCalendarService;
+import com.kjd.reimbursement.util.IdGenerator;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -32,6 +33,8 @@ public class FkReimMainServiceImpl extends ServiceImpl<FkReimMainMapper, FkReimM
     private FkReimSubsidyService fkReimSubsidyService;
     @Autowired
     private FkSubsidyCalendarService fkSubsidyCalendarService;
+    @Autowired
+    private IdGenerator idGenerator;
 
     // 城市餐补标准映射: Key为城市类型(1=一线, 2=二线, 3=三线), Value为每日餐补金额(元)
     private static final Map<String, String> CITY_MEAL_STANDARD = Map.of("1", "100", "2", "80", "3", "50");
@@ -112,9 +115,10 @@ public class FkReimMainServiceImpl extends ServiceImpl<FkReimMainMapper, FkReimM
     @Override
     @Transactional
     public String saveReimbursement(Map<String, Object> params) {
-        // 1. 解析前端传来的主单数据并设置创建时间
+        // 1. 解析前端传来的主单数据并设置创建时间和ID
         Map<String, Object> mainData = (Map<String, Object>) params.get("main");
         FkReimMain fkReimMain = parseMain(mainData);
+        fkReimMain.setId(idGenerator.nextId(this));
         fkReimMain.setCreationTime(LocalDate.now().format(DateTimeFormatter.ISO_LOCAL_DATE));
 
         // 2. 解析行程数据并进行重复性校验
@@ -122,7 +126,9 @@ public class FkReimMainServiceImpl extends ServiceImpl<FkReimMainMapper, FkReimM
         List<FkReimItinerary> itineraries = new ArrayList<>();
         if (itineraryData != null) {
             for (Map<String, Object> item : itineraryData) {
-                itineraries.add(parseItinerary(item));
+                FkReimItinerary it = parseItinerary(item);
+                it.setId(idGenerator.nextId(fkReimItineraryService));
+                itineraries.add(it);
             }
         }
         validateItineraryDuplicate(itineraries);
@@ -132,8 +138,14 @@ public class FkReimMainServiceImpl extends ServiceImpl<FkReimMainMapper, FkReimM
         List<List<FkSubsidyCalendar>> allCalendars = new ArrayList<>();
         for (FkReimItinerary it : itineraries) {
             Map<String, Object> subsidyResult = calculateSubsidy(it, fkReimMain.getBusinessTypeId(), fkReimMain.getBusinessTypeNo(), fkReimMain.getBusinessTypeName());
-            subsidies.add((FkReimSubsidy) subsidyResult.get("subsidy"));
-            allCalendars.add((List<FkSubsidyCalendar>) subsidyResult.get("calendars"));
+            FkReimSubsidy subsidy = (FkReimSubsidy) subsidyResult.get("subsidy");
+            subsidy.setId(idGenerator.nextId(fkReimSubsidyService));
+            List<FkSubsidyCalendar> calendars = (List<FkSubsidyCalendar>) subsidyResult.get("calendars");
+            for (FkSubsidyCalendar cal : calendars) {
+                cal.setId(idGenerator.nextId(fkSubsidyCalendarService));
+            }
+            subsidies.add(subsidy);
+            allCalendars.add(calendars);
         }
 
         // 4. 汇总所有行程的补助金额（餐补、交通补、通讯补），更新到主单
