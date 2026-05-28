@@ -159,6 +159,9 @@ public class FkReimMainServiceImpl extends ServiceImpl<FkReimMainMapper, FkReimM
             totalTraffic = totalTraffic.add(new BigDecimal(s.getTransportationAllowance()));
             totalComm = totalComm.add(new BigDecimal(s.getPhoneAllowance()));
         }
+        // 4.1 校验前端传入金额与后端计算金额是否一致
+        validateAmountConsistency(mainData, totalSubsidy, totalMeal, totalTraffic, totalComm);
+
         fkReimMain.setSubsidyTotal(totalSubsidy.toPlainString());
         fkReimMain.setMealAllowance(totalMeal.toPlainString());
         fkReimMain.setTransportationAllowance(totalTraffic.toPlainString());
@@ -313,6 +316,47 @@ public class FkReimMainServiceImpl extends ServiceImpl<FkReimMainMapper, FkReimM
             if (!keySet.add(key)) {
                 throw new RuntimeException("出行人[" + it.getTravelerName() + "]在日期[" + it.getDepartureDate() + "~" + it.getArrivalDate() + "]存在重复行程");
             }
+        }
+    }
+
+    /**
+     * 校验前端传入金额与后端计算金额是否一致
+     */
+    private void validateAmountConsistency(Map<String, Object> mainData,
+                                           BigDecimal calcTotal, BigDecimal calcMeal,
+                                           BigDecimal calcTraffic, BigDecimal calcComm) {
+        BigDecimal frontTotal = parseBigDecimal(mainData.get("subsidyTotal"));
+        BigDecimal frontMeal = parseBigDecimal(mainData.get("mealAllowance"));
+        BigDecimal frontTraffic = parseBigDecimal(mainData.get("transportationAllowance"));
+        BigDecimal frontComm = parseBigDecimal(mainData.get("phoneAllowance"));
+
+        // 前端未传入金额字段则跳过校验
+        if (frontTotal == null && frontMeal == null && frontTraffic == null && frontComm == null) {
+            return;
+        }
+
+        if (frontTotal != null && frontTotal.compareTo(calcTotal) != 0) {
+            throw new RuntimeException("补贴总额不一致：前端传入" + frontTotal + "，后端计算" + calcTotal);
+        }
+        if (frontMeal != null && frontMeal.compareTo(calcMeal) != 0) {
+            throw new RuntimeException("餐饮补贴不一致：前端传入" + frontMeal + "，后端计算" + calcMeal);
+        }
+        if (frontTraffic != null && frontTraffic.compareTo(calcTraffic) != 0) {
+            throw new RuntimeException("交通补贴不一致：前端传入" + frontTraffic + "，后端计算" + calcTraffic);
+        }
+        if (frontComm != null && frontComm.compareTo(calcComm) != 0) {
+            throw new RuntimeException("通讯补贴不一致：前端传入" + frontComm + "，后端计算" + calcComm);
+        }
+    }
+
+    private BigDecimal parseBigDecimal(Object value) {
+        if (value == null) return null;
+        try {
+            String str = value.toString().trim();
+            if (str.isEmpty()) return null;
+            return new BigDecimal(str);
+        } catch (NumberFormatException e) {
+            return null;
         }
     }
 
