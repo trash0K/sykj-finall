@@ -1,7 +1,12 @@
 package com.kjd.reimbursement.service.impl;
 
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
+import com.baomidou.mybatisplus.extension.service.IService;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.kjd.reimbursement.exception.BusinessException;
+import com.kjd.reimbursement.exception.ErrorCode;
 import com.kjd.reimbursement.mapper.FkReimMainMapper;
 import com.kjd.reimbursement.pojo.entity.FkReimItinerary;
 import com.kjd.reimbursement.pojo.entity.FkReimMain;
@@ -14,15 +19,19 @@ import com.kjd.reimbursement.service.FkReimSubsidyService;
 import com.kjd.reimbursement.service.FkSubsidyCalendarService;
 import com.kjd.reimbursement.util.IdGenerator;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.util.DigestUtils;
 import org.springframework.util.StringUtils;
 
 import java.math.BigDecimal;
+import java.nio.charset.StandardCharsets;
 import java.time.LocalDate;
 import java.time.format.DateTimeFormatter;
 import java.time.temporal.ChronoUnit;
 import java.util.*;
+import java.util.concurrent.TimeUnit;
 
 @Service
 public class FkReimMainServiceImpl extends ServiceImpl<FkReimMainMapper, FkReimMain> implements FkReimMainService {
@@ -35,6 +44,10 @@ public class FkReimMainServiceImpl extends ServiceImpl<FkReimMainMapper, FkReimM
     private FkSubsidyCalendarService fkSubsidyCalendarService;
     @Autowired
     private IdGenerator idGenerator;
+    @Autowired(required = false)
+    private StringRedisTemplate redisTemplate;
+    @Autowired
+    private ObjectMapper objectMapper;
 
     // 城市餐补标准映射: Key为城市类型(1=一线, 2=二线, 3=三线), Value为每日餐补金额(元)
     private static final Map<String, String> CITY_MEAL_STANDARD = Map.of("1", "100", "2", "80", "3", "50");
@@ -42,6 +55,11 @@ public class FkReimMainServiceImpl extends ServiceImpl<FkReimMainMapper, FkReimM
     private static final String TRAFFIC_STANDARD = "40";
     // 通讯补助标准: 每人每日固定金额(元)
     private static final String COMMUNICATION_STANDARD = "40";
+    private static final String LIST_CACHE_PREFIX = "reim:list:";
+    private static final String LIST_CACHE_INDEX_KEY = "reim:list:keys";
+    private static final String DETAIL_CACHE_PREFIX = "reim:main:";
+    private static final String CITY_CACHE_PREFIX = "reim:city:";
+    private static final String NULL_CACHE_VALUE = "__NULL__";
 
     /**
      * 获取报销单列表（分页）
@@ -50,6 +68,13 @@ public class FkReimMainServiceImpl extends ServiceImpl<FkReimMainMapper, FkReimM
     public PageResult getReimbursementList(Integer page, Integer size, String id, String reimbursementTitle,
                                            String reimburserName, String reimDepartmentName, String reimCompanyName,
                                            String businessTripReason, String businessTypeName) {
+        String cacheKey = buildListCacheKey(page, size, id, reimbursementTitle, reimburserName,
+                reimDepartmentName, reimCompanyName, businessTripReason, businessTypeName);
+        PageResult cached = getJsonCache(cacheKey, PageResult.class);
+        if (cached != null) {
+            return cached;
+        }
+
         // 1. 构建分页对象
         Page<FkReimMain> pageParam = new Page<>(page, size);
 
@@ -67,7 +92,10 @@ public class FkReimMainServiceImpl extends ServiceImpl<FkReimMainMapper, FkReimM
         );
 
         // 3.返回包含总记录数和当前页数据的PageResult对象
-        return new PageResult(result.getTotal(), result.getRecords());
+        PageResult pageResult = new PageResult(result.getTotal(), result.getRecords());
+        putJsonCache(cacheKey, pageResult, 10, TimeUnit.MINUTES);
+        registerListCacheKey(cacheKey);
+        return pageResult;
     }
 
     /**
@@ -75,10 +103,23 @@ public class FkReimMainServiceImpl extends ServiceImpl<FkReimMainMapper, FkReimM
      */
     @Override
     public Map<String, Object> getReimbursementDetail(String id) {
+        String cacheKey = DETAIL_CACHE_PREFIX + id;
+        String cachedJson = getStringCache(cacheKey);
+        if (StringUtils.hasText(cachedJson)) {
+            if (NULL_CACHE_VALUE.equals(cachedJson)) {
+                throw new BusinessException(ErrorCode.REIMBURSEMENT_NOT_FOUND);
+            }
+            Map<String, Object> cached = readJson(cachedJson, Map.class);
+            if (cached != null) {
+                return cached;
+            }
+        }
+
         // 1. 查询报销单主表信息
         FkReimMain fkReimMain = this.getById(id);
         if (fkReimMain == null) {
-            throw new RuntimeException("报销单不存在");
+            putStringCache(cacheKey, NULL_CACHE_VALUE, 2, TimeUnit.MINUTES);
+            throw new BusinessException(ErrorCode.REIMBURSEMENT_NOT_FOUND);
         }
 
         // 2. 查询关联的行程列表
@@ -106,6 +147,7 @@ public class FkReimMainServiceImpl extends ServiceImpl<FkReimMainMapper, FkReimM
         data.put("main", fkReimMain);
         data.put("itineraries", itineraries);
         data.put("subsidyDetails", subsidyDetails);
+        putJsonCache(cacheKey, data, 10, TimeUnit.MINUTES);
         return data;
     }
 
@@ -115,80 +157,9 @@ public class FkReimMainServiceImpl extends ServiceImpl<FkReimMainMapper, FkReimM
     @Override
     @Transactional
     public String saveReimbursement(Map<String, Object> params) {
-        // 1. 解析前端传来的主单数据并设置创建时间和ID
-        Map<String, Object> mainData = (Map<String, Object>) params.get("main");
-        FkReimMain fkReimMain = parseMain(mainData);
-        fkReimMain.setId(idGenerator.nextId(this));
-        fkReimMain.setCreationTime(LocalDate.now().format(DateTimeFormatter.ISO_LOCAL_DATE));
-
-        // 2. 解析行程数据并进行重复性校验
-        List<Map<String, Object>> itineraryData = (List<Map<String, Object>>) params.get("itineraries");
-        List<FkReimItinerary> itineraries = new ArrayList<>();
-        if (itineraryData != null) {
-            for (Map<String, Object> item : itineraryData) {
-                FkReimItinerary it = parseItinerary(item);
-                it.setId(idGenerator.nextId(fkReimItineraryService));
-                itineraries.add(it);
-            }
-        }
-        validateItineraryDuplicate(itineraries);
-
-        // 3. 遍历行程，自动计算补助金额并生成补助日历
-        List<FkReimSubsidy> subsidies = new ArrayList<>();
-        List<List<FkSubsidyCalendar>> allCalendars = new ArrayList<>();
-        for (FkReimItinerary it : itineraries) {
-            Map<String, Object> subsidyResult = calculateSubsidy(it, fkReimMain.getBusinessTypeId(), fkReimMain.getBusinessTypeNo(), fkReimMain.getBusinessTypeName());
-            FkReimSubsidy subsidy = (FkReimSubsidy) subsidyResult.get("subsidy");
-            subsidy.setId(idGenerator.nextId(fkReimSubsidyService));
-            List<FkSubsidyCalendar> calendars = (List<FkSubsidyCalendar>) subsidyResult.get("calendars");
-            for (FkSubsidyCalendar cal : calendars) {
-                cal.setId(idGenerator.nextId(fkSubsidyCalendarService));
-            }
-            subsidies.add(subsidy);
-            allCalendars.add(calendars);
-        }
-
-        // 4. 汇总所有行程的补助金额（餐补、交通补、通讯补），更新到主单
-        BigDecimal totalSubsidy = BigDecimal.ZERO;
-        BigDecimal totalMeal = BigDecimal.ZERO;
-        BigDecimal totalTraffic = BigDecimal.ZERO;
-        BigDecimal totalComm = BigDecimal.ZERO;
-        for (FkReimSubsidy s : subsidies) {
-            totalSubsidy = totalSubsidy.add(new BigDecimal(s.getSubsidyAmount()));
-            totalMeal = totalMeal.add(new BigDecimal(s.getMealAllowance()));
-            totalTraffic = totalTraffic.add(new BigDecimal(s.getTransportationAllowance()));
-            totalComm = totalComm.add(new BigDecimal(s.getPhoneAllowance()));
-        }
-        // 4.1 校验前端传入金额与后端计算金额是否一致
-        validateAmountConsistency(mainData, totalSubsidy, totalMeal, totalTraffic, totalComm);
-
-        fkReimMain.setSubsidyTotal(totalSubsidy.toPlainString());
-        fkReimMain.setMealAllowance(totalMeal.toPlainString());
-        fkReimMain.setTransportationAllowance(totalTraffic.toPlainString());
-        fkReimMain.setPhoneAllowance(totalComm.toPlainString());
-
-        // 5. 持久化保存主单数据
-        this.save(fkReimMain);
-
-        // 6. 关联主单ID，批量保存行程数据
-        for (FkReimItinerary it : itineraries) {
-            it.setMainId(fkReimMain.getId());
-        }
-        fkReimItineraryService.saveBatch(itineraries);
-
-        // 步骤7: 关联主单ID，保存补助数据及其对应的日历数据
-        for (int i = 0; i < subsidies.size(); i++) {
-            FkReimSubsidy sub = subsidies.get(i);
-            sub.setMainId(fkReimMain.getId());
-            fkReimSubsidyService.save(sub);
-            List<FkSubsidyCalendar> calendars = allCalendars.get(i);
-            for (FkSubsidyCalendar cal : calendars) {
-                cal.setMainId(sub.getId());
-            }
-            fkSubsidyCalendarService.saveBatch(calendars);
-        }
-
-        return fkReimMain.getId();
+        String id = saveReimbursementInternal(params, null, null);
+        evictReimbursementCaches(id);
+        return id;
     }
 
     /**
@@ -200,7 +171,7 @@ public class FkReimMainServiceImpl extends ServiceImpl<FkReimMainMapper, FkReimM
         // 1. 校验主单是否存在
         FkReimMain fkReimMain = this.getById(id);
         if (fkReimMain == null) {
-            throw new RuntimeException("报销单不存在");
+            throw new BusinessException(ErrorCode.REIMBURSEMENT_NOT_FOUND);
         }
 
         // 2. 删除关联的行程数据
@@ -223,6 +194,7 @@ public class FkReimMainServiceImpl extends ServiceImpl<FkReimMainMapper, FkReimM
 
         // 4. 删除报销单主表记录
         this.removeById(id);
+        evictReimbursementCaches(id);
     }
 
     /**
@@ -233,13 +205,16 @@ public class FkReimMainServiceImpl extends ServiceImpl<FkReimMainMapper, FkReimM
     public String updateReimbursement(Map<String, Object> params) {
         // 1. 校验待更新的报销单是否存在
         Map<String, Object> mainData = (Map<String, Object>) params.get("main");
+        if (mainData == null) {
+            throw new BusinessException(ErrorCode.MAIN_DATA_EMPTY);
+        }
         String mainId = (String) mainData.get("id");
         if (!StringUtils.hasText(mainId)) {
-            throw new RuntimeException("报销单ID不能为空");
+            throw new BusinessException(ErrorCode.REIMBURSEMENT_ID_EMPTY);
         }
         FkReimMain existing = this.getById(mainId);
         if (existing == null) {
-            throw new RuntimeException("报销单不存在");
+            throw new BusinessException(ErrorCode.REIMBURSEMENT_NOT_FOUND);
         }
 
         // 2. 清除旧的关联数据（行程、补助日历、补助）
@@ -259,11 +234,133 @@ public class FkReimMainServiceImpl extends ServiceImpl<FkReimMainMapper, FkReimM
                 .eq(FkReimSubsidy::getMainId, mainId)
                 .remove();
 
-        // 3. 调用保存逻辑重新插入最新数据
-        return saveReimbursement(params);
+        // 3. 保留原报销单ID，重新保存主单和明细
+        String id = saveReimbursementInternal(params, mainId, existing.getCreationTime());
+        evictReimbursementCaches(id);
+        return id;
+    }
+
+    /**
+     * 复制报销单
+     */
+    @Override
+    @Transactional
+    public String copyReimbursement(String id) {
+        FkReimMain source = this.getById(id);
+        if (source == null) {
+            throw new BusinessException(ErrorCode.REIMBURSEMENT_NOT_FOUND);
+        }
+
+        List<FkReimItinerary> sourceItineraries = fkReimItineraryService.lambdaQuery()
+                .eq(FkReimItinerary::getMainId, id)
+                .list();
+
+        Map<String, Object> params = new HashMap<>();
+        params.put("main", buildMainMap(source));
+
+        List<Map<String, Object>> itineraries = new ArrayList<>();
+        for (FkReimItinerary sourceItinerary : sourceItineraries) {
+            itineraries.add(buildItineraryMap(sourceItinerary));
+        }
+        params.put("itineraries", itineraries);
+
+        String newId = saveReimbursementInternal(params, null, null);
+        evictReimbursementCaches(newId);
+        return newId;
     }
 
     // ===== 私有辅助方法 =====
+
+    private String saveReimbursementInternal(Map<String, Object> params, String fixedMainId, String fixedCreationTime) {
+        Map<String, Object> mainData = (Map<String, Object>) params.get("main");
+        if (mainData == null) {
+            throw new BusinessException(ErrorCode.MAIN_DATA_EMPTY);
+        }
+
+        FkReimMain fkReimMain = parseMain(mainData);
+        boolean updateMode = StringUtils.hasText(fixedMainId);
+        fkReimMain.setId(updateMode ? fixedMainId : idGenerator.nextId(this));
+        fkReimMain.setCreationTime(StringUtils.hasText(fixedCreationTime)
+                ? fixedCreationTime
+                : LocalDate.now().format(DateTimeFormatter.ISO_LOCAL_DATE));
+
+        List<Map<String, Object>> itineraryData = (List<Map<String, Object>>) params.get("itineraries");
+        List<FkReimItinerary> itineraries = new ArrayList<>();
+        Set<String> itineraryIds = new HashSet<>();
+        if (itineraryData != null) {
+            for (Map<String, Object> item : itineraryData) {
+                FkReimItinerary it = parseItinerary(item);
+                it.setId(nextBufferedId(fkReimItineraryService, itineraryIds));
+                itineraries.add(it);
+            }
+        }
+        validateItineraryDuplicate(itineraries);
+
+        List<FkReimSubsidy> subsidies = new ArrayList<>();
+        List<List<FkSubsidyCalendar>> allCalendars = new ArrayList<>();
+        Set<String> subsidyIds = new HashSet<>();
+        Set<String> calendarIds = new HashSet<>();
+        for (FkReimItinerary it : itineraries) {
+            Map<String, Object> subsidyResult = calculateSubsidy(it, fkReimMain.getBusinessTypeId(), fkReimMain.getBusinessTypeNo(), fkReimMain.getBusinessTypeName());
+            FkReimSubsidy subsidy = (FkReimSubsidy) subsidyResult.get("subsidy");
+            subsidy.setId(nextBufferedId(fkReimSubsidyService, subsidyIds));
+            List<FkSubsidyCalendar> calendars = (List<FkSubsidyCalendar>) subsidyResult.get("calendars");
+            for (FkSubsidyCalendar cal : calendars) {
+                cal.setId(nextBufferedId(fkSubsidyCalendarService, calendarIds));
+            }
+            subsidies.add(subsidy);
+            allCalendars.add(calendars);
+        }
+
+        BigDecimal totalSubsidy = BigDecimal.ZERO;
+        BigDecimal totalMeal = BigDecimal.ZERO;
+        BigDecimal totalTraffic = BigDecimal.ZERO;
+        BigDecimal totalComm = BigDecimal.ZERO;
+        for (FkReimSubsidy subsidy : subsidies) {
+            totalSubsidy = totalSubsidy.add(new BigDecimal(subsidy.getSubsidyAmount()));
+            totalMeal = totalMeal.add(new BigDecimal(subsidy.getMealAllowance()));
+            totalTraffic = totalTraffic.add(new BigDecimal(subsidy.getTransportationAllowance()));
+            totalComm = totalComm.add(new BigDecimal(subsidy.getPhoneAllowance()));
+        }
+
+        validateAmount(mainData, "subsidyTotal", "补助总金额", totalSubsidy);
+        validateAmount(mainData, "mealAllowance", "餐费补助", totalMeal);
+        validateAmount(mainData, "transportationAllowance", "交通补助", totalTraffic);
+        validateAmount(mainData, "phoneAllowance", "通讯补助", totalComm);
+
+        fkReimMain.setSubsidyTotal(totalSubsidy.toPlainString());
+        fkReimMain.setMealAllowance(totalMeal.toPlainString());
+        fkReimMain.setTransportationAllowance(totalTraffic.toPlainString());
+        fkReimMain.setPhoneAllowance(totalComm.toPlainString());
+
+        if (updateMode) {
+            this.updateById(fkReimMain);
+        } else {
+            this.save(fkReimMain);
+        }
+
+        for (FkReimItinerary it : itineraries) {
+            it.setMainId(fkReimMain.getId());
+        }
+        if (!itineraries.isEmpty()) {
+            fkReimItineraryService.saveBatch(itineraries);
+        }
+
+        for (int i = 0; i < subsidies.size(); i++) {
+            FkReimSubsidy sub = subsidies.get(i);
+            sub.setMainId(fkReimMain.getId());
+            fkReimSubsidyService.save(sub);
+            List<FkSubsidyCalendar> calendars = allCalendars.get(i);
+            for (FkSubsidyCalendar cal : calendars) {
+                cal.setMainId(sub.getId());
+            }
+            if (!calendars.isEmpty()) {
+                fkSubsidyCalendarService.saveBatch(calendars);
+            }
+        }
+
+        return fkReimMain.getId();
+    }
 
     /**
      * 解析主单数据
@@ -314,49 +411,8 @@ public class FkReimMainServiceImpl extends ServiceImpl<FkReimMainMapper, FkReimM
         for (FkReimItinerary it : itineraries) {
             String key = it.getTravelerId() + "_" + it.getDepartureDate() + "_" + it.getArrivalDate();
             if (!keySet.add(key)) {
-                throw new RuntimeException("出行人[" + it.getTravelerName() + "]在日期[" + it.getDepartureDate() + "~" + it.getArrivalDate() + "]存在重复行程");
+                throw new BusinessException(ErrorCode.ITINERARY_DUPLICATE, "出行人[" + it.getTravelerName() + "]在日期[" + it.getDepartureDate() + "~" + it.getArrivalDate() + "]存在重复行程");
             }
-        }
-    }
-
-    /**
-     * 校验前端传入金额与后端计算金额是否一致
-     */
-    private void validateAmountConsistency(Map<String, Object> mainData,
-                                           BigDecimal calcTotal, BigDecimal calcMeal,
-                                           BigDecimal calcTraffic, BigDecimal calcComm) {
-        BigDecimal frontTotal = parseBigDecimal(mainData.get("subsidyTotal"));
-        BigDecimal frontMeal = parseBigDecimal(mainData.get("mealAllowance"));
-        BigDecimal frontTraffic = parseBigDecimal(mainData.get("transportationAllowance"));
-        BigDecimal frontComm = parseBigDecimal(mainData.get("phoneAllowance"));
-
-        // 前端未传入金额字段则跳过校验
-        if (frontTotal == null && frontMeal == null && frontTraffic == null && frontComm == null) {
-            return;
-        }
-
-        if (frontTotal != null && frontTotal.compareTo(calcTotal) != 0) {
-            throw new RuntimeException("补贴总额不一致：前端传入" + frontTotal + "，后端计算" + calcTotal);
-        }
-        if (frontMeal != null && frontMeal.compareTo(calcMeal) != 0) {
-            throw new RuntimeException("餐饮补贴不一致：前端传入" + frontMeal + "，后端计算" + calcMeal);
-        }
-        if (frontTraffic != null && frontTraffic.compareTo(calcTraffic) != 0) {
-            throw new RuntimeException("交通补贴不一致：前端传入" + frontTraffic + "，后端计算" + calcTraffic);
-        }
-        if (frontComm != null && frontComm.compareTo(calcComm) != 0) {
-            throw new RuntimeException("通讯补贴不一致：前端传入" + frontComm + "，后端计算" + calcComm);
-        }
-    }
-
-    private BigDecimal parseBigDecimal(Object value) {
-        if (value == null) return null;
-        try {
-            String str = value.toString().trim();
-            if (str.isEmpty()) return null;
-            return new BigDecimal(str);
-        } catch (NumberFormatException e) {
-            return null;
         }
     }
 
@@ -368,7 +424,7 @@ public class FkReimMainServiceImpl extends ServiceImpl<FkReimMainMapper, FkReimM
         LocalDate start = LocalDate.parse(it.getDepartureDate());
         LocalDate end = LocalDate.parse(it.getArrivalDate());
         if (end.isBefore(start)) {
-            throw new RuntimeException("到达日期不能早于出发日期");
+            throw new BusinessException(ErrorCode.DATE_INVALID, "到达日期不能早于出发日期");
         }
         long days = ChronoUnit.DAYS.between(start, end) + 1;
 
@@ -432,9 +488,198 @@ public class FkReimMainServiceImpl extends ServiceImpl<FkReimMainMapper, FkReimM
      * 根据城市编号获取城市类型（一线/二线/三线）
      */
     private String getCityTypeByNo(String cityNo) {
+        String cacheKey = CITY_CACHE_PREFIX + Objects.toString(cityNo, "");
+        String cached = getStringCache(cacheKey);
+        if (StringUtils.hasText(cached)) {
+            return cached;
+        }
+
         Map<String, String> cityTypeMap = Map.of(
                 "10119", "1", "10621", "1", "10458", "2", "10216", "2", "10455", "3"
         );
-        return cityTypeMap.getOrDefault(cityNo, "3");
+        String cityType = cityTypeMap.getOrDefault(cityNo, "3");
+        putStringCache(cacheKey, cityType, 1, TimeUnit.HOURS);
+        return cityType;
+    }
+
+    private void validateAmount(Map<String, Object> mainData, String fieldName, String fieldLabel, BigDecimal calculated) {
+        Object value = mainData.get(fieldName);
+        if (value == null || !StringUtils.hasText(value.toString())) {
+            return;
+        }
+
+        BigDecimal frontendAmount;
+        try {
+            frontendAmount = new BigDecimal(value.toString());
+        } catch (NumberFormatException e) {
+            throw new BusinessException(ErrorCode.AMOUNT_CHECK_FAILED, fieldLabel + "格式不正确");
+        }
+
+        if (frontendAmount.compareTo(calculated) != 0) {
+            BigDecimal diff = frontendAmount.subtract(calculated);
+            throw new BusinessException(ErrorCode.AMOUNT_CHECK_FAILED, fieldLabel + "与后端计算金额不一致，前端传入"
+                    + frontendAmount.toPlainString() + "，后端计算"
+                    + calculated.toPlainString() + "，差额" + diff.toPlainString());
+        }
+    }
+
+    private <T> String nextBufferedId(IService<T> service, Set<String> usedIds) {
+        String id = idGenerator.nextId(service);
+        while (usedIds.contains(id)) {
+            id = increaseId(id);
+        }
+        usedIds.add(id);
+        return id;
+    }
+
+    private String increaseId(String id) {
+        if (id == null || id.length() < 3) {
+            throw new BusinessException(ErrorCode.ID_GENERATE_FAILED, "主键生成失败");
+        }
+        String prefix = id.substring(0, id.length() - 3);
+        int seq = Integer.parseInt(id.substring(id.length() - 3)) + 1;
+        if (seq > 999) {
+            throw new BusinessException(ErrorCode.ID_GENERATE_FAILED, "当日ID序号已超上限(999)，请稍后重试");
+        }
+        return prefix + String.format("%03d", seq);
+    }
+
+    private Map<String, Object> buildMainMap(FkReimMain main) {
+        Map<String, Object> data = new HashMap<>();
+        data.put("reimbursementTitle", main.getReimbursementTitle());
+        data.put("reimburserId", main.getReimburserId());
+        data.put("reimburserNo", main.getReimburserNo());
+        data.put("reimburserName", main.getReimburserName());
+        data.put("reimDepartmentId", main.getReimDepartmentId());
+        data.put("reimDepartmentNo", main.getReimDepartmentNo());
+        data.put("reimDepartmentName", main.getReimDepartmentName());
+        data.put("reimCompanyId", main.getReimCompanyId());
+        data.put("reimCompanyNo", main.getReimCompanyNo());
+        data.put("reimCompanyName", main.getReimCompanyName());
+        data.put("businessTypeId", main.getBusinessTypeId());
+        data.put("businessTypeNo", main.getBusinessTypeNo());
+        data.put("businessTypeName", main.getBusinessTypeName());
+        data.put("businessTripReason", main.getBusinessTripReason());
+        data.put("subsidyTotal", main.getSubsidyTotal());
+        data.put("mealAllowance", main.getMealAllowance());
+        data.put("transportationAllowance", main.getTransportationAllowance());
+        data.put("phoneAllowance", main.getPhoneAllowance());
+        data.put("remarks", main.getRemarks());
+        return data;
+    }
+
+    private Map<String, Object> buildItineraryMap(FkReimItinerary itinerary) {
+        Map<String, Object> data = new HashMap<>();
+        data.put("travelerId", itinerary.getTravelerId());
+        data.put("travelerNo", itinerary.getTravelerNo());
+        data.put("travelerName", itinerary.getTravelerName());
+        data.put("departureDate", itinerary.getDepartureDate());
+        data.put("arrivalDate", itinerary.getArrivalDate());
+        data.put("departureCity", itinerary.getDepartureCity());
+        data.put("departureCityNo", itinerary.getDepartureCityNo());
+        data.put("arrivingCity", itinerary.getArrivingCity());
+        data.put("arrivingCityNo", itinerary.getArrivingCityNo());
+        data.put("itineraryInstructions", itinerary.getItineraryInstructions());
+        return data;
+    }
+
+    private String buildListCacheKey(Integer page, Integer size, String id, String reimbursementTitle,
+                                     String reimburserName, String reimDepartmentName, String reimCompanyName,
+                                     String businessTripReason, String businessTypeName) {
+        String rawKey = String.join("|",
+                Objects.toString(page, "1"),
+                Objects.toString(size, "10"),
+                Objects.toString(id, ""),
+                Objects.toString(reimbursementTitle, ""),
+                Objects.toString(reimburserName, ""),
+                Objects.toString(reimDepartmentName, ""),
+                Objects.toString(reimCompanyName, ""),
+                Objects.toString(businessTripReason, ""),
+                Objects.toString(businessTypeName, ""));
+        return LIST_CACHE_PREFIX + DigestUtils.md5DigestAsHex(rawKey.getBytes(StandardCharsets.UTF_8));
+    }
+
+    private <T> T getJsonCache(String key, Class<T> type) {
+        String json = getStringCache(key);
+        if (!StringUtils.hasText(json)) {
+            return null;
+        }
+        return readJson(json, type);
+    }
+
+    private <T> T readJson(String json, Class<T> type) {
+        try {
+            return objectMapper.readValue(json, type);
+        } catch (JsonProcessingException e) {
+            return null;
+        }
+    }
+
+    private Map<String, Object> getMapCache(String key) {
+        Map cached = getJsonCache(key, Map.class);
+        if (cached == null) {
+            return null;
+        }
+        return cached;
+    }
+
+    private String getStringCache(String key) {
+        if (redisTemplate == null) {
+            return null;
+        }
+        try {
+            return redisTemplate.opsForValue().get(key);
+        } catch (RuntimeException e) {
+            return null;
+        }
+    }
+
+    private void putJsonCache(String key, Object value, long timeout, TimeUnit unit) {
+        try {
+            putStringCache(key, objectMapper.writeValueAsString(value), timeout, unit);
+        } catch (JsonProcessingException e) {
+            // 缓存失败时保留主流程
+        }
+    }
+
+    private void putStringCache(String key, String value, long timeout, TimeUnit unit) {
+        if (redisTemplate == null) {
+            return;
+        }
+        try {
+            redisTemplate.opsForValue().set(key, value, timeout, unit);
+        } catch (RuntimeException e) {
+            // 缓存失败时保留主流程
+        }
+    }
+
+    private void registerListCacheKey(String cacheKey) {
+        if (redisTemplate == null) {
+            return;
+        }
+        try {
+            redisTemplate.opsForSet().add(LIST_CACHE_INDEX_KEY, cacheKey);
+            redisTemplate.expire(LIST_CACHE_INDEX_KEY, 30, TimeUnit.MINUTES);
+        } catch (RuntimeException e) {
+            // 缓存失败时保留主流程
+        }
+    }
+
+    private void evictReimbursementCaches(String id) {
+        if (redisTemplate == null) {
+            return;
+        }
+        try {
+            Set<String> keys = redisTemplate.opsForSet().members(LIST_CACHE_INDEX_KEY);
+            if (keys != null && !keys.isEmpty()) {
+                redisTemplate.delete(keys);
+            }
+            redisTemplate.delete(LIST_CACHE_INDEX_KEY);
+            if (StringUtils.hasText(id)) {
+                redisTemplate.delete(DETAIL_CACHE_PREFIX + id);
+            }
+        } catch (RuntimeException e) {
+            // 缓存失败时保留主流程
+        }
     }
 }
