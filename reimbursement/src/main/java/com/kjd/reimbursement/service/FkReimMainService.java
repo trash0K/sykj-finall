@@ -50,4 +50,11 @@ public interface FkReimMainService extends IService<FkReimMain> {
      * @return
      */
     String updateReimbursement(Map<String, Object> params);
+
+    /**
+     * 复制报销单
+     * @param id
+     * @return
+     */
+    String copyReimbursement(String id);
 }

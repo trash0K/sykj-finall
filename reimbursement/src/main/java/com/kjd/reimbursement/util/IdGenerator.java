@@ -2,6 +2,8 @@ package com.kjd.reimbursement.util;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.extension.service.IService;
+import com.kjd.reimbursement.exception.BusinessException;
+import com.kjd.reimbursement.exception.ErrorCode;
 import org.springframework.stereotype.Component;
 
 import java.time.LocalDate;
@@ -43,7 +45,7 @@ public class IdGenerator {
         }
 
         if (seq > 999) {
-            throw new RuntimeException("当日ID序号已超上限(999)，请稍后重试");
+            throw new BusinessException(ErrorCode.ID_GENERATE_FAILED, "当日ID序号已超上限(999)，请稍后重试");
         }
 
         return prefix + String.format("%03d", seq);

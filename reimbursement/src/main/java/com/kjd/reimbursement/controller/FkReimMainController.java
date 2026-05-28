@@ -1,5 +1,7 @@
 package com.kjd.reimbursement.controller;
 
+import com.kjd.reimbursement.exception.BusinessException;
+import com.kjd.reimbursement.exception.ErrorCode;
 import com.kjd.reimbursement.pojo.vo.PageResult;
 import com.kjd.reimbursement.pojo.vo.Result;
 import com.kjd.reimbursement.service.FkReimMainService;
@@ -42,7 +44,7 @@ public class FkReimMainController {
             Map<String, Object> data = fkReimMainService.getReimbursementDetail(id);
             return Result.success(data);
         } catch (RuntimeException e) {
-            return Result.error(e.getMessage());
+            return handleException(e);
         }
     }
 
@@ -55,7 +57,7 @@ public class FkReimMainController {
             String id = fkReimMainService.saveReimbursement(params);
             return Result.success(id);
         } catch (RuntimeException e) {
-            return Result.error(e.getMessage());
+            return handleException(e);
         }
     }
 
@@ -68,7 +70,7 @@ public class FkReimMainController {
             fkReimMainService.deleteReimbursement(id);
             return Result.success();
         } catch (RuntimeException e) {
-            return Result.error(e.getMessage());
+            return handleException(e);
         }
     }
 
@@ -81,7 +83,27 @@ public class FkReimMainController {
             String id = fkReimMainService.updateReimbursement(params);
             return Result.success(id);
         } catch (RuntimeException e) {
-            return Result.error(e.getMessage());
+            return handleException(e);
         }
+    }
+
+    /**
+     * 复制报销单
+     */
+    @PostMapping("/{id}/copy")
+    public Result<String> copy(@PathVariable String id) {
+        try {
+            String newId = fkReimMainService.copyReimbursement(id);
+            return Result.success(newId);
+        } catch (RuntimeException e) {
+            return handleException(e);
+        }
+    }
+
+    private <T> Result<T> handleException(RuntimeException e) {
+        if (e instanceof BusinessException businessException) {
+            return Result.error(businessException.getCode(), businessException.getMessage());
+        }
+        return Result.error(ErrorCode.SYSTEM_ERROR.getCode(), e.getMessage());
     }
 }
