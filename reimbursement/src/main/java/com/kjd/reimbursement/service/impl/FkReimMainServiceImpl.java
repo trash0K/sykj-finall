@@ -157,8 +157,11 @@ public class FkReimMainServiceImpl extends ServiceImpl<FkReimMainMapper, FkReimM
     @Override
     @Transactional
     public String saveReimbursement(Map<String, Object> params) {
+        // 1. 调用内部保存方法处理核心逻辑（新增模式）
         String id = saveReimbursementInternal(params, null, null);
+        // 2. 清除相关缓存，保证数据一致性
         evictReimbursementCaches(id);
+        // 3. 返回新生成的报销单ID
         return id;
     }
 
@@ -194,6 +197,7 @@ public class FkReimMainServiceImpl extends ServiceImpl<FkReimMainMapper, FkReimM
 
         // 4. 删除报销单主表记录
         this.removeById(id);
+        // 5. 清除相关缓存
         evictReimbursementCaches(id);
     }
 
@@ -234,9 +238,11 @@ public class FkReimMainServiceImpl extends ServiceImpl<FkReimMainMapper, FkReimM
                 .eq(FkReimSubsidy::getMainId, mainId)
                 .remove();
 
-        // 3. 保留原报销单ID，重新保存主单和明细
+        // 3. 保留原报销单ID和创建时间，重新保存主单和明细
         String id = saveReimbursementInternal(params, mainId, existing.getCreationTime());
+        // 4. 清除相关缓存
         evictReimbursementCaches(id);
+        // 5. 返回报销单ID
         return id;
     }
 
@@ -246,15 +252,18 @@ public class FkReimMainServiceImpl extends ServiceImpl<FkReimMainMapper, FkReimM
     @Override
     @Transactional
     public String copyReimbursement(String id) {
+        // 1. 查询源报销单是否存在
         FkReimMain source = this.getById(id);
         if (source == null) {
             throw new BusinessException(ErrorCode.REIMBURSEMENT_NOT_FOUND);
         }
 
+        // 2. 查询源报销单的所有行程
         List<FkReimItinerary> sourceItineraries = fkReimItineraryService.lambdaQuery()
                 .eq(FkReimItinerary::getMainId, id)
                 .list();
 
+        // 3. 构建复制参数，将源数据转换为Map结构
         Map<String, Object> params = new HashMap<>();
         params.put("main", buildMainMap(source));
 
@@ -264,19 +273,27 @@ public class FkReimMainServiceImpl extends ServiceImpl<FkReimMainMapper, FkReimM
         }
         params.put("itineraries", itineraries);
 
+        // 4. 调用内部保存方法创建新报销单（生成新ID）
         String newId = saveReimbursementInternal(params, null, null);
+        // 5. 清除相关缓存
         evictReimbursementCaches(newId);
+        // 6. 返回新报销单ID
         return newId;
     }
 
     // ===== 私有辅助方法 =====
 
+    /**
+     * 内部保存方法：处理报销单的核心保存逻辑（支持新增和更新）
+     */
     private String saveReimbursementInternal(Map<String, Object> params, String fixedMainId, String fixedCreationTime) {
+        // 1. 解析并校验主单数据
         Map<String, Object> mainData = (Map<String, Object>) params.get("main");
         if (mainData == null) {
             throw new BusinessException(ErrorCode.MAIN_DATA_EMPTY);
         }
 
+        // 2. 构建主单对象，判断是更新模式还是新增模式
         FkReimMain fkReimMain = parseMain(mainData);
         boolean updateMode = StringUtils.hasText(fixedMainId);
         fkReimMain.setId(updateMode ? fixedMainId : idGenerator.nextId(this));
@@ -284,6 +301,7 @@ public class FkReimMainServiceImpl extends ServiceImpl<FkReimMainMapper, FkReimM
                 ? fixedCreationTime
                 : LocalDate.now().format(DateTimeFormatter.ISO_LOCAL_DATE));
 
+        // 3. 解析行程数据，使用缓冲ID生成机制避免冲突
         List<Map<String, Object>> itineraryData = (List<Map<String, Object>>) params.get("itineraries");
         List<FkReimItinerary> itineraries = new ArrayList<>();
         Set<String> itineraryIds = new HashSet<>();
@@ -294,8 +312,10 @@ public class FkReimMainServiceImpl extends ServiceImpl<FkReimMainMapper, FkReimM
                 itineraries.add(it);
             }
         }
+        // 4. 校验行程是否重复
         validateItineraryDuplicate(itineraries);
 
+        // 5. 遍历行程，计算补助金额并生成补助日历
         List<FkReimSubsidy> subsidies = new ArrayList<>();
         List<List<FkSubsidyCalendar>> allCalendars = new ArrayList<>();
         Set<String> subsidyIds = new HashSet<>();
@@ -312,6 +332,7 @@ public class FkReimMainServiceImpl extends ServiceImpl<FkReimMainMapper, FkReimM
             allCalendars.add(calendars);
         }
 
+        // 6. 汇总所有行程的补助金额
         BigDecimal totalSubsidy = BigDecimal.ZERO;
         BigDecimal totalMeal = BigDecimal.ZERO;
         BigDecimal totalTraffic = BigDecimal.ZERO;
@@ -323,22 +344,26 @@ public class FkReimMainServiceImpl extends ServiceImpl<FkReimMainMapper, FkReimM
             totalComm = totalComm.add(new BigDecimal(subsidy.getPhoneAllowance()));
         }
 
+        // 7. 校验前端传入金额与后端计算金额是否一致
         validateAmount(mainData, "subsidyTotal", "补助总金额", totalSubsidy);
         validateAmount(mainData, "mealAllowance", "餐费补助", totalMeal);
         validateAmount(mainData, "transportationAllowance", "交通补助", totalTraffic);
         validateAmount(mainData, "phoneAllowance", "通讯补助", totalComm);
 
+        // 8. 将汇总金额设置到主单对象
         fkReimMain.setSubsidyTotal(totalSubsidy.toPlainString());
         fkReimMain.setMealAllowance(totalMeal.toPlainString());
         fkReimMain.setTransportationAllowance(totalTraffic.toPlainString());
         fkReimMain.setPhoneAllowance(totalComm.toPlainString());
 
+        // 9. 根据模式执行插入或更新操作
         if (updateMode) {
             this.updateById(fkReimMain);
         } else {
             this.save(fkReimMain);
         }
 
+        // 10. 关联主单ID，批量保存行程数据
         for (FkReimItinerary it : itineraries) {
             it.setMainId(fkReimMain.getId());
         }
@@ -346,6 +371,7 @@ public class FkReimMainServiceImpl extends ServiceImpl<FkReimMainMapper, FkReimM
             fkReimItineraryService.saveBatch(itineraries);
         }
 
+        // 11. 关联主单ID，保存补助数据及其对应的日历数据
         for (int i = 0; i < subsidies.size(); i++) {
             FkReimSubsidy sub = subsidies.get(i);
             sub.setMainId(fkReimMain.getId());
@@ -359,6 +385,7 @@ public class FkReimMainServiceImpl extends ServiceImpl<FkReimMainMapper, FkReimM
             }
         }
 
+        // 12. 返回报销单ID
         return fkReimMain.getId();
     }
 
@@ -366,7 +393,9 @@ public class FkReimMainServiceImpl extends ServiceImpl<FkReimMainMapper, FkReimM
      * 解析主单数据
      */
     private FkReimMain parseMain(Map<String, Object> data) {
+        // 1. 创建主单对象
         FkReimMain fkReimMain = new FkReimMain();
+        // 2. 从Map中提取字段并设置到对象
         fkReimMain.setReimbursementTitle((String) data.get("reimbursementTitle"));
         fkReimMain.setReimburserId((String) data.get("reimburserId"));
         fkReimMain.setReimburserNo((String) data.get("reimburserNo"));
@@ -382,6 +411,7 @@ public class FkReimMainServiceImpl extends ServiceImpl<FkReimMainMapper, FkReimM
         fkReimMain.setBusinessTypeName((String) data.get("businessTypeName"));
         fkReimMain.setBusinessTripReason((String) data.get("businessTripReason"));
         fkReimMain.setRemarks((String) data.get("remarks"));
+        // 3. 返回主单对象
         return fkReimMain;
     }
 
@@ -389,7 +419,9 @@ public class FkReimMainServiceImpl extends ServiceImpl<FkReimMainMapper, FkReimM
      * 解析行程数据
      */
     private FkReimItinerary parseItinerary(Map<String, Object> data) {
+        // 1. 创建行程对象
         FkReimItinerary it = new FkReimItinerary();
+        // 2. 从Map中提取字段并设置到对象
         it.setTravelerId((String) data.get("travelerId"));
         it.setTravelerNo((String) data.get("travelerNo"));
         it.setTravelerName((String) data.get("travelerName"));
@@ -400,6 +432,7 @@ public class FkReimMainServiceImpl extends ServiceImpl<FkReimMainMapper, FkReimM
         it.setArrivingCity((String) data.get("arrivingCity"));
         it.setArrivingCityNo((String) data.get("arrivingCityNo"));
         it.setItineraryInstructions((String) data.get("itineraryInstructions"));
+        // 3. 返回行程对象
         return it;
     }
 
@@ -407,9 +440,12 @@ public class FkReimMainServiceImpl extends ServiceImpl<FkReimMainMapper, FkReimM
      * 校验行程是否重复（同一出行人+同一天数区间）
      */
     private void validateItineraryDuplicate(List<FkReimItinerary> itineraries) {
+        // 1. 使用Set存储行程唯一标识
         Set<String> keySet = new HashSet<>();
         for (FkReimItinerary it : itineraries) {
+            // 2. 构建唯一键：出行人ID_出发日期_到达日期
             String key = it.getTravelerId() + "_" + it.getDepartureDate() + "_" + it.getArrivalDate();
+            // 3. 如果添加失败，说明存在重复行程
             if (!keySet.add(key)) {
                 throw new BusinessException(ErrorCode.ITINERARY_DUPLICATE, "出行人[" + it.getTravelerName() + "]在日期[" + it.getDepartureDate() + "~" + it.getArrivalDate() + "]存在重复行程");
             }
@@ -420,7 +456,7 @@ public class FkReimMainServiceImpl extends ServiceImpl<FkReimMainMapper, FkReimM
      * 计算单个行程的补助金额及每日日历
      */
     private Map<String, Object> calculateSubsidy(FkReimItinerary it, String businessTypeId, String businessTypeNo, String businessTypeName) {
-        // 步骤1: 计算出差天数
+        // 1. 计算出差天数
         LocalDate start = LocalDate.parse(it.getDepartureDate());
         LocalDate end = LocalDate.parse(it.getArrivalDate());
         if (end.isBefore(start)) {
@@ -428,17 +464,17 @@ public class FkReimMainServiceImpl extends ServiceImpl<FkReimMainMapper, FkReimM
         }
         long days = ChronoUnit.DAYS.between(start, end) + 1;
 
-        // 步骤2: 根据城市类型确定补助标准
+        // 2. 根据城市类型确定补助标准
         String cityType = getCityTypeByNo(it.getArrivingCityNo());
         String mealStandard = CITY_MEAL_STANDARD.getOrDefault(cityType, "50");
 
-        // 步骤3: 计算各项补助总额
+        // 3. 计算各项补助总额
         BigDecimal mealTotal = new BigDecimal(mealStandard).multiply(BigDecimal.valueOf(days));
         BigDecimal trafficTotal = new BigDecimal(TRAFFIC_STANDARD).multiply(BigDecimal.valueOf(days));
         BigDecimal commTotal = new BigDecimal(COMMUNICATION_STANDARD).multiply(BigDecimal.valueOf(days));
         BigDecimal totalAmount = mealTotal.add(trafficTotal).add(commTotal);
 
-        // 步骤4: 封装补助实体对象
+        // 4. 封装补助实体对象
         FkReimSubsidy subsidy = new FkReimSubsidy();
         subsidy.setTravelerId(it.getTravelerId());
         subsidy.setTravelerNo(it.getTravelerNo());
@@ -459,7 +495,7 @@ public class FkReimMainServiceImpl extends ServiceImpl<FkReimMainMapper, FkReimM
         subsidy.setBusinessTypeNo(businessTypeNo);
         subsidy.setBusinessTypeName(businessTypeName);
 
-        // 步骤5: 生成每日补助日历（按天拆分）
+        // 5. 生成每日补助日历（按天拆分）
         List<FkSubsidyCalendar> calendars = new ArrayList<>();
         DateTimeFormatter weekFmt = DateTimeFormatter.ofPattern("E", Locale.CHINA); //星期
         for (LocalDate d = start; !d.isAfter(end); d = d.plusDays(1)) {
@@ -478,6 +514,7 @@ public class FkReimMainServiceImpl extends ServiceImpl<FkReimMainMapper, FkReimM
             calendars.add(cal);
         }
 
+        // 6. 封装结果并返回
         Map<String, Object> result = new HashMap<>();
         result.put("subsidy", subsidy);
         result.put("calendars", calendars);
@@ -488,26 +525,35 @@ public class FkReimMainServiceImpl extends ServiceImpl<FkReimMainMapper, FkReimM
      * 根据城市编号获取城市类型（一线/二线/三线）
      */
     private String getCityTypeByNo(String cityNo) {
+        // 1. 尝试从缓存中获取城市类型
         String cacheKey = CITY_CACHE_PREFIX + Objects.toString(cityNo, "");
         String cached = getStringCache(cacheKey);
         if (StringUtils.hasText(cached)) {
             return cached;
         }
 
+        // 2. 从配置Map中获取城市类型
         Map<String, String> cityTypeMap = Map.of(
                 "10119", "1", "10621", "1", "10458", "2", "10216", "2", "10455", "3"
         );
         String cityType = cityTypeMap.getOrDefault(cityNo, "3");
+        // 3. 存入缓存，有效期1小时
         putStringCache(cacheKey, cityType, 1, TimeUnit.HOURS);
+        // 4. 返回城市类型
         return cityType;
     }
 
+    /**
+     * 校验金额：比较前端传入值与后端计算值
+     */
     private void validateAmount(Map<String, Object> mainData, String fieldName, String fieldLabel, BigDecimal calculated) {
+        // 1. 获取前端传入的金额值
         Object value = mainData.get(fieldName);
         if (value == null || !StringUtils.hasText(value.toString())) {
             return;
         }
 
+        // 2. 解析前端金额为BigDecimal
         BigDecimal frontendAmount;
         try {
             frontendAmount = new BigDecimal(value.toString());
@@ -515,6 +561,7 @@ public class FkReimMainServiceImpl extends ServiceImpl<FkReimMainMapper, FkReimM
             throw new BusinessException(ErrorCode.AMOUNT_CHECK_FAILED, fieldLabel + "格式不正确");
         }
 
+        // 3. 比较前端金额与后端计算金额是否一致
         if (frontendAmount.compareTo(calculated) != 0) {
             BigDecimal diff = frontendAmount.subtract(calculated);
             throw new BusinessException(ErrorCode.AMOUNT_CHECK_FAILED, fieldLabel + "与后端计算金额不一致，前端传入"
@@ -523,29 +570,48 @@ public class FkReimMainServiceImpl extends ServiceImpl<FkReimMainMapper, FkReimM
         }
     }
 
+    /**
+     * 生成缓冲ID，避免在同一批次中产生重复ID
+     */
     private <T> String nextBufferedId(IService<T> service, Set<String> usedIds) {
+        // 1. 从ID生成器获取新ID
         String id = idGenerator.nextId(service);
+        // 2. 如果ID已使用，递增直到找到未使用的ID
         while (usedIds.contains(id)) {
             id = increaseId(id);
         }
+        // 3. 标记该ID已被使用
         usedIds.add(id);
+        // 4. 返回唯一ID
         return id;
     }
 
+    /**
+     * ID递增：将最后3位序号加1
+     */
     private String increaseId(String id) {
+        // 1. 校验ID格式
         if (id == null || id.length() < 3) {
             throw new BusinessException(ErrorCode.ID_GENERATE_FAILED, "主键生成失败");
         }
+        // 2. 提取前缀和序号
         String prefix = id.substring(0, id.length() - 3);
         int seq = Integer.parseInt(id.substring(id.length() - 3)) + 1;
+        // 3. 检查序号是否超出上限
         if (seq > 999) {
             throw new BusinessException(ErrorCode.ID_GENERATE_FAILED, "当日ID序号已超上限(999)，请稍后重试");
         }
+        // 4. 返回递增后的ID
         return prefix + String.format("%03d", seq);
     }
 
+    /**
+     * 将主单对象转换为Map
+     */
     private Map<String, Object> buildMainMap(FkReimMain main) {
+        // 1. 创建Map对象
         Map<String, Object> data = new HashMap<>();
+        // 2. 将主单字段逐个放入Map
         data.put("reimbursementTitle", main.getReimbursementTitle());
         data.put("reimburserId", main.getReimburserId());
         data.put("reimburserNo", main.getReimburserNo());
@@ -565,11 +631,17 @@ public class FkReimMainServiceImpl extends ServiceImpl<FkReimMainMapper, FkReimM
         data.put("transportationAllowance", main.getTransportationAllowance());
         data.put("phoneAllowance", main.getPhoneAllowance());
         data.put("remarks", main.getRemarks());
+        // 3. 返回Map
         return data;
     }
 
+    /**
+     * 将行程对象转换为Map
+     */
     private Map<String, Object> buildItineraryMap(FkReimItinerary itinerary) {
+        // 1. 创建Map对象
         Map<String, Object> data = new HashMap<>();
+        // 2. 将行程字段逐个放入Map
         data.put("travelerId", itinerary.getTravelerId());
         data.put("travelerNo", itinerary.getTravelerNo());
         data.put("travelerName", itinerary.getTravelerName());
@@ -580,12 +652,17 @@ public class FkReimMainServiceImpl extends ServiceImpl<FkReimMainMapper, FkReimM
         data.put("arrivingCity", itinerary.getArrivingCity());
         data.put("arrivingCityNo", itinerary.getArrivingCityNo());
         data.put("itineraryInstructions", itinerary.getItineraryInstructions());
+        // 3. 返回Map
         return data;
     }
 
+    /**
+     * 构建列表查询的缓存Key
+     */
     private String buildListCacheKey(Integer page, Integer size, String id, String reimbursementTitle,
                                      String reimburserName, String reimDepartmentName, String reimCompanyName,
                                      String businessTripReason, String businessTypeName) {
+        // 1. 将所有查询参数拼接成字符串
         String rawKey = String.join("|",
                 Objects.toString(page, "1"),
                 Objects.toString(size, "10"),
@@ -596,17 +673,26 @@ public class FkReimMainServiceImpl extends ServiceImpl<FkReimMainMapper, FkReimM
                 Objects.toString(reimCompanyName, ""),
                 Objects.toString(businessTripReason, ""),
                 Objects.toString(businessTypeName, ""));
+        // 2. 对原始字符串进行MD5加密，生成唯一缓存Key
         return LIST_CACHE_PREFIX + DigestUtils.md5DigestAsHex(rawKey.getBytes(StandardCharsets.UTF_8));
     }
 
+    /**
+     * 从缓存中获取JSON数据并反序列化
+     */
     private <T> T getJsonCache(String key, Class<T> type) {
+        // 1. 获取缓存中的JSON字符串
         String json = getStringCache(key);
         if (!StringUtils.hasText(json)) {
             return null;
         }
+        // 2. 将JSON字符串反序列化为指定类型
         return readJson(json, type);
     }
 
+    /**
+     * 将JSON字符串反序列化为对象
+     */
     private <T> T readJson(String json, Class<T> type) {
         try {
             return objectMapper.readValue(json, type);
@@ -615,6 +701,9 @@ public class FkReimMainServiceImpl extends ServiceImpl<FkReimMainMapper, FkReimM
         }
     }
 
+    /**
+     * 从缓存中获取Map对象
+     */
     private Map<String, Object> getMapCache(String key) {
         Map cached = getJsonCache(key, Map.class);
         if (cached == null) {
@@ -623,10 +712,15 @@ public class FkReimMainServiceImpl extends ServiceImpl<FkReimMainMapper, FkReimM
         return cached;
     }
 
+    /**
+     * 从Redis获取字符串缓存
+     */
     private String getStringCache(String key) {
+        // 1. 检查Redis模板是否可用
         if (redisTemplate == null) {
             return null;
         }
+        // 2. 从Redis获取值
         try {
             return redisTemplate.opsForValue().get(key);
         } catch (RuntimeException e) {
@@ -634,18 +728,27 @@ public class FkReimMainServiceImpl extends ServiceImpl<FkReimMainMapper, FkReimM
         }
     }
 
+    /**
+     * 将对象序列化后存入Redis缓存
+     */
     private void putJsonCache(String key, Object value, long timeout, TimeUnit unit) {
         try {
+            // 1. 将对象序列化为JSON字符串
             putStringCache(key, objectMapper.writeValueAsString(value), timeout, unit);
         } catch (JsonProcessingException e) {
             // 缓存失败时保留主流程
         }
     }
 
+    /**
+     * 将字符串存入Redis缓存
+     */
     private void putStringCache(String key, String value, long timeout, TimeUnit unit) {
+        // 1. 检查Redis模板是否可用
         if (redisTemplate == null) {
             return;
         }
+        // 2. 存入Redis并设置过期时间
         try {
             redisTemplate.opsForValue().set(key, value, timeout, unit);
         } catch (RuntimeException e) {
@@ -653,28 +756,40 @@ public class FkReimMainServiceImpl extends ServiceImpl<FkReimMainMapper, FkReimM
         }
     }
 
+    /**
+     * 注册列表缓存Key，方便后续批量清理
+     */
     private void registerListCacheKey(String cacheKey) {
         if (redisTemplate == null) {
             return;
         }
         try {
+            // 1. 将缓存Key加入索引集合
             redisTemplate.opsForSet().add(LIST_CACHE_INDEX_KEY, cacheKey);
+            // 2. 设置索引集合的过期时间
             redisTemplate.expire(LIST_CACHE_INDEX_KEY, 30, TimeUnit.MINUTES);
         } catch (RuntimeException e) {
             // 缓存失败时保留主流程
         }
     }
 
+    /**
+     * 清除报销单相关的所有缓存
+     */
     private void evictReimbursementCaches(String id) {
         if (redisTemplate == null) {
             return;
         }
         try {
+            // 1. 获取所有列表缓存Key
             Set<String> keys = redisTemplate.opsForSet().members(LIST_CACHE_INDEX_KEY);
             if (keys != null && !keys.isEmpty()) {
+                // 2. 批量删除列表缓存
                 redisTemplate.delete(keys);
             }
+            // 3. 删除列表索引集合
             redisTemplate.delete(LIST_CACHE_INDEX_KEY);
+            // 4. 删除详情缓存
             if (StringUtils.hasText(id)) {
                 redisTemplate.delete(DETAIL_CACHE_PREFIX + id);
             }
