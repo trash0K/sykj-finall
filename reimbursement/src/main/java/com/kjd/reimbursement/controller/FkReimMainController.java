@@ -108,6 +108,34 @@ public class FkReimMainController {
         }
     }
 
+    /**
+     * 提交报销单（状态改为已完成）
+     */
+    @PutMapping("/{id}/submit")
+    public Result<String> submit(@PathVariable String id) {
+        log.info("提交报销单: id={}", id);
+        try {
+            fkReimMainService.submitReimbursement(id);
+            return Result.success();
+        } catch (RuntimeException e) {
+            return handleException(e);
+        }
+    }
+
+    /**
+     * 作废报销单（状态改为已作废）
+     */
+    @PutMapping("/{id}/void")
+    public Result<String> voidDoc(@PathVariable String id) {
+        log.info("作废报销单: id={}", id);
+        try {
+            fkReimMainService.voidReimbursement(id);
+            return Result.success();
+        } catch (RuntimeException e) {
+            return handleException(e);
+        }
+    }
+
     private <T> Result<T> handleException(RuntimeException e) {
         if (e instanceof BusinessException businessException) {
             log.warn("业务异常: code={}, msg={}", businessException.getCode(), businessException.getMessage());

@@ -57,4 +57,16 @@ public interface FkReimMainService extends IService<FkReimMain> {
      * @return
      */
     String copyReimbursement(String id);
+
+    /**
+     * 提交报销单（状态改为已完成）
+     * @param id
+     */
+    void submitReimbursement(String id);
+
+    /**
+     * 作废报销单（状态改为已作废）
+     * @param id
+     */
+    void voidReimbursement(String id);
 }

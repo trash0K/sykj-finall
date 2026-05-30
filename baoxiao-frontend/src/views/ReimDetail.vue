@@ -320,6 +320,8 @@ const form = reactive({
     mealAllowance: '0.00',
     transportationAllowance: '0.00',
     phoneAllowance: '0.00',
+    docStatus: '0',
+    docType: '日常报销单',
     remarks: '',
     creationTime: ''
   },

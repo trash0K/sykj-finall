@@ -348,6 +348,40 @@ public class FkReimMainServiceImpl extends ServiceImpl<FkReimMainMapper, FkReimM
         return newId;
     }
 
+    /**
+     * 提交报销单（状态改为已完成 code:1）
+     */
+    @Override
+    @Transactional
+    public void submitReimbursement(String id) {
+        FkReimMain main = this.getById(id);
+        if (main == null) {
+            throw new BusinessException(ErrorCode.REIMBURSEMENT_NOT_FOUND);
+        }
+        this.lambdaUpdate()
+                .eq(FkReimMain::getId, id)
+                .set(FkReimMain::getDocStatus, "1")
+                .update();
+        evictReimbursementCaches(id);
+    }
+
+    /**
+     * 作废报销单（状态改为已作废 code:2）
+     */
+    @Override
+    @Transactional
+    public void voidReimbursement(String id) {
+        FkReimMain main = this.getById(id);
+        if (main == null) {
+            throw new BusinessException(ErrorCode.REIMBURSEMENT_NOT_FOUND);
+        }
+        this.lambdaUpdate()
+                .eq(FkReimMain::getId, id)
+                .set(FkReimMain::getDocStatus, "2")
+                .update();
+        evictReimbursementCaches(id);
+    }
+
     // ===== 私有辅助方法 =====
 
     /**
@@ -541,6 +575,8 @@ public class FkReimMainServiceImpl extends ServiceImpl<FkReimMainMapper, FkReimM
         fkReimMain.setBusinessTypeNo((String) data.get("businessTypeNo"));
         fkReimMain.setBusinessTypeName((String) data.get("businessTypeName"));
         fkReimMain.setBusinessTripReason((String) data.get("businessTripReason"));
+        fkReimMain.setDocStatus(Objects.toString(data.get("docStatus"), "0"));
+        fkReimMain.setDocType(Objects.toString(data.get("docType"), "日常报销单"));
         fkReimMain.setRemarks((String) data.get("remarks"));
         // 3. 返回主单对象
         return fkReimMain;
@@ -894,6 +930,8 @@ public class FkReimMainServiceImpl extends ServiceImpl<FkReimMainMapper, FkReimM
         data.put("mealAllowance", main.getMealAllowance());
         data.put("transportationAllowance", main.getTransportationAllowance());
         data.put("phoneAllowance", main.getPhoneAllowance());
+        data.put("docStatus", main.getDocStatus());
+        data.put("docType", main.getDocType());
         data.put("remarks", main.getRemarks());
         // 3. 返回Map
         return data;

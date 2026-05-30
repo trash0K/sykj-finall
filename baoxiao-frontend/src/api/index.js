@@ -61,7 +61,9 @@ export const reimApi = {
   save: (data) => api.post('/reimbursement/save', data),
   update: (data) => api.put('/reimbursement/update', data),
   delete: (id) => api.delete(`/reimbursement/${id}`),
-  copy: (id) => api.post(`/reimbursement/${id}/copy`)
+  copy: (id) => api.post(`/reimbursement/${id}/copy`),
+  submit: (id) => api.put(`/reimbursement/${id}/submit`),
+  voidDoc: (id) => api.put(`/reimbursement/${id}/void`)
 }
 
 /**

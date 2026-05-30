@@ -25,6 +25,11 @@ CREATE TABLE `fk_reim_main` (
   PRIMARY KEY (`id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='报销单主表';
 
+-- 报销单主表增加单据状态和单据类型字段
+ALTER TABLE `fk_reim_main`
+    ADD COLUMN `doc_status` varchar(10) DEFAULT '0' COMMENT '单据状态: 0=草稿, 1=已完成, 2=已作废' AFTER `phone_allowance`,
+    ADD COLUMN `doc_type` varchar(50) DEFAULT '日常报销单' COMMENT '单据类型' AFTER `doc_status`;
+
 -- 补录行程表
 DROP TABLE IF EXISTS `fk_reim_itinerary`;
 CREATE TABLE `fk_reim_itinerary` (

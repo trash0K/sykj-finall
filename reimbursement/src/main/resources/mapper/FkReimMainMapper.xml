@@ -22,6 +22,8 @@
         <result column="meal_allowance" property="mealAllowance"/>
         <result column="transportation_allowance" property="transportationAllowance"/>
         <result column="phone_allowance" property="phoneAllowance"/>
+        <result column="doc_status" property="docStatus"/>
+        <result column="doc_type" property="docType"/>
         <result column="remarks" property="remarks"/>
     </resultMap>
 </mapper>

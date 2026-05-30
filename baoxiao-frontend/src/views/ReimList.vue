@@ -4,26 +4,26 @@
       <div class="search-card">
         <el-form :model="query" inline class="search-form" label-width="100px">
           <el-form-item label="报销单号">
-            <el-input v-model="query.id" placeholder="请输入" clearable style="width:160px" />
+            <el-input v-model="query.id" placeholder="请输入" clearable style="width:200px" />
           </el-form-item>
           <el-form-item label="标题">
-            <el-input v-model="query.reimbursementTitle" placeholder="请输入" clearable style="width:160px" />
+            <el-input v-model="query.reimbursementTitle" placeholder="请输入" clearable style="width:200px" />
           </el-form-item>
           <el-form-item label="事由">
-            <el-input v-model="query.businessTripReason" placeholder="请输入" clearable style="width:160px" />
+            <el-input v-model="query.businessTripReason" placeholder="请输入" clearable style="width:200px" />
           </el-form-item>
           <el-form-item label="费用归属公司">
-            <el-select v-model="query.reimCompanyName" placeholder="请选择" clearable style="width:180px">
+            <el-select v-model="query.reimCompanyName" placeholder="请选择" clearable style="width:200px">
               <el-option v-for="c in companies" :key="c.reimCompanyId" :label="c.reimCompanyName" :value="c.reimCompanyName" />
             </el-select>
           </el-form-item>
           <el-form-item label="报销部门">
-            <el-select v-model="query.reimDepartmentName" placeholder="请选择" clearable style="width:180px">
+            <el-select v-model="query.reimDepartmentName" placeholder="请选择" clearable style="width:200px">
               <el-option v-for="d in departments" :key="d.reimDepartmentId" :label="d.reimDepartmentName" :value="d.reimDepartmentName" />
             </el-select>
           </el-form-item>
           <el-form-item label="报销人">
-            <el-select v-model="query.reimburserName" placeholder="请选择" clearable style="width:160px">
+            <el-select v-model="query.reimburserName" placeholder="请选择" clearable style="width:200px">
               <el-option v-for="e in employees" :key="e.reimburserId" :label="e.reimburserName" :value="e.reimburserName" />
             </el-select>
           </el-form-item>
@@ -35,7 +35,7 @@
               placeholder="请选择"
               clearable
               check-strictly
-              style="width:180px"
+              style="width:200px"
             />
           </el-form-item>
           <el-form-item class="search-actions">
@@ -55,7 +55,7 @@
           :header-cell-style="tableHeaderStyle"
         >
           <el-table-column type="index" label="" width="50" align="center" :index="indexMethod" />
-          <el-table-column label="操作" width="140" align="center">
+          <el-table-column label="操作" width="140" align="center" fixed="left">
             <template #default="{ row }">
               <div class="op-icons">
                 <el-tooltip content="编辑" placement="top">
@@ -68,11 +68,24 @@
                     <el-icon :size="16"><Delete /></el-icon>
                   </el-button>
                 </el-tooltip>
-                <el-tooltip content="复制" placement="top">
-                  <el-button link type="primary" @click="handleCopy(row)">
-                    <el-icon :size="16"><CopyDocument /></el-icon>
+                <el-dropdown trigger="hover" @command="(cmd) => handleCommand(cmd, row)">
+                  <el-button link type="primary" class="more-btn">
+                    <el-icon :size="16"><MoreFilled /></el-icon>
                   </el-button>
-                </el-tooltip>
+                  <template #dropdown>
+                    <el-dropdown-menu>
+                      <el-dropdown-item command="copy">
+                        <el-icon><CopyDocument /></el-icon> 复制
+                      </el-dropdown-item>
+                      <el-dropdown-item command="submit">
+                        <el-icon><Promotion /></el-icon> 提交
+                      </el-dropdown-item>
+                      <el-dropdown-item command="void">
+                        <el-icon><CircleCloseFilled /></el-icon> 作废
+                      </el-dropdown-item>
+                    </el-dropdown-menu>
+                  </template>
+                </el-dropdown>
               </div>
             </template>
           </el-table-column>
@@ -80,6 +93,17 @@
             <template #default="{ row }">
               <span class="link-text" @click="handleView(row)">{{ row.id }}</span>
             </template>
+          </el-table-column>
+          <el-table-column label="单据状态" width="100" align="center">
+            <template #default="{ row }">
+              <el-tag v-if="row.docStatus === '0'" type="info" size="small">草稿</el-tag>
+              <el-tag v-else-if="row.docStatus === '1'" type="success" size="small">已完成</el-tag>
+              <el-tag v-else-if="row.docStatus === '2'" type="danger" size="small">已作废</el-tag>
+              <el-tag v-else type="info" size="small">草稿</el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column prop="docType" label="单据类型" width="120" show-overflow-tooltip>
+            <template #default="{ row }">{{ row.docType || '日常报销单' }}</template>
           </el-table-column>
           <el-table-column label="报销人" width="160" show-overflow-tooltip>
             <template #default="{ row }">{{ row.reimburserName }}[{{ row.reimburserNo }}]</template>
@@ -124,7 +148,7 @@
 <script setup>
 import { ref, reactive, onMounted, onActivated, watch } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
-import { Edit, Delete, CopyDocument } from '@element-plus/icons-vue'
+import { Edit, Delete, CopyDocument, MoreFilled, Promotion, CircleCloseFilled } from '@element-plus/icons-vue'
 import { reimApi, dictApi } from '../api'
 import { buildTree } from '../utils/reim'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
@@ -234,6 +258,37 @@ const confirmCopy = async () => {
   }
 }
 
+// 更多操作下拉
+const handleCommand = (cmd, row) => {
+  if (cmd === 'copy') {
+    handleCopy(row)
+  } else if (cmd === 'submit') {
+    submitRow(row)
+  } else if (cmd === 'void') {
+    voidRow(row)
+  }
+}
+
+const submitRow = async (row) => {
+  try {
+    await reimApi.submit(row.id)
+    ElMessage.success('提交成功')
+    handleSearch()
+  } catch (e) {
+    ElMessage.error(e.message || '提交失败')
+  }
+}
+
+const voidRow = async (row) => {
+  try {
+    await reimApi.voidDoc(row.id)
+    ElMessage.success('作废成功')
+    handleSearch()
+  } catch (e) {
+    ElMessage.error(e.message || '作废失败')
+  }
+}
+
 const refreshList = () => {
   query.page = 1
   handleSearch()
@@ -285,6 +340,9 @@ watch(() => route.query._t, () => {
   align-items: center;
   justify-content: center;
   gap: 6px;
+}
+.more-btn {
+  padding: 0;
 }
 .link-text {
   color: #409eff;

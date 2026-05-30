@@ -33,5 +33,7 @@ public class FkReimMain implements Serializable {
     private String mealAllowance;//餐饮补贴
     private String transportationAllowance;//交通补贴
     private String phoneAllowance;//通讯补贴
+    private String docStatus;//单据状态: 0=草稿, 1=已完成, 2=已作废
+    private String docType;//单据类型
     private String remarks;//备注
 }
