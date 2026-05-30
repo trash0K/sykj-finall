@@ -25,6 +25,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.util.DigestUtils;
 import org.springframework.util.StringUtils;
 
@@ -36,6 +37,7 @@ import java.time.temporal.ChronoUnit;
 import java.util.*;
 import java.util.concurrent.TimeUnit;
 
+@Slf4j
 @Service
 public class FkReimMainServiceImpl extends ServiceImpl<FkReimMainMapper, FkReimMain> implements FkReimMainService {
 
@@ -115,8 +117,13 @@ public class FkReimMainServiceImpl extends ServiceImpl<FkReimMainMapper, FkReimM
                 throw new BusinessException(ErrorCode.REIMBURSEMENT_NOT_FOUND);
             }
             Map<String, Object> cached = readJson(cachedJson, Map.class);
-            if (cached != null) {
+            // 缓存格式校验：旧格式含subsidyDetails但无subsidies，视为过期缓存，需重新查询
+            if (cached != null && cached.containsKey("subsidies")) {
                 return cached;
+            }
+            // 清除旧格式缓存
+            if (redisTemplate != null) {
+                try { redisTemplate.delete(cacheKey); } catch (RuntimeException ignored) {}
             }
         }
 
@@ -283,7 +290,25 @@ public class FkReimMainServiceImpl extends ServiceImpl<FkReimMainMapper, FkReimM
                 .eq(FkReimItinerary::getMainId, id)
                 .list();
 
-        // 3. 构建复制参数，将源数据转换为Map结构
+        // 3. 查询源报销单的补助数据（保留原始勾选金额）
+        List<FkReimSubsidy> sourceSubsidies = fkReimSubsidyService.lambdaQuery()
+                .eq(FkReimSubsidy::getMainId, id)
+                .list();
+
+        // 4. 查询源报销单的日历数据
+        List<FkSubsidyCalendar> allSourceCalendars = new ArrayList<>();
+        for (FkReimSubsidy sub : sourceSubsidies) {
+            allSourceCalendars.addAll(fkSubsidyCalendarService.lambdaQuery()
+                    .eq(FkSubsidyCalendar::getMainId, sub.getId())
+                    .list());
+        }
+
+        // 5. 查询源报销单的费用归属及分摊数据
+        List<FkReimAllocation> sourceAllocations = fkReimAllocationService.lambdaQuery()
+                .eq(FkReimAllocation::getMainId, id)
+                .list();
+
+        // 6. 构建复制参数，将源数据转换为Map结构
         Map<String, Object> params = new HashMap<>();
         params.put("main", buildMainMap(source));
 
@@ -293,11 +318,33 @@ public class FkReimMainServiceImpl extends ServiceImpl<FkReimMainMapper, FkReimM
         }
         params.put("itineraries", itineraries);
 
-        // 4. 调用内部保存方法创建新报销单（生成新ID）
+        // 补助数据：用源记录的key作为临时mainId，保证日历能正确关联
+        List<Map<String, Object>> subsidies = new ArrayList<>();
+        for (FkReimSubsidy sub : sourceSubsidies) {
+            Map<String, Object> subMap = buildSubsidyMap(sub);
+            // 用源subsidy的ID作为临时key，日历会引用这个key
+            subMap.put("id", sub.getId());
+            subsidies.add(subMap);
+        }
+        params.put("subsidies", subsidies);
+
+        List<Map<String, Object>> calendars = new ArrayList<>();
+        for (FkSubsidyCalendar cal : allSourceCalendars) {
+            calendars.add(buildCalendarMap(cal));
+        }
+        params.put("calendars", calendars);
+
+        List<Map<String, Object>> allocations = new ArrayList<>();
+        for (FkReimAllocation alloc : sourceAllocations) {
+            allocations.add(buildAllocationMap(alloc));
+        }
+        params.put("allocations", allocations);
+
+        // 7. 调用内部保存方法创建新报销单（生成新ID）
         String newId = saveReimbursementInternal(params, null, null);
-        // 5. 清除相关缓存
+        // 8. 清除相关缓存
         evictReimbursementCaches(newId);
-        // 6. 返回新报销单ID
+        // 9. 返回新报销单ID
         return newId;
     }
 
@@ -339,6 +386,8 @@ public class FkReimMainServiceImpl extends ServiceImpl<FkReimMainMapper, FkReimM
         List<Map<String, Object>> subsidyData = (List<Map<String, Object>>) params.get("subsidies");
         List<Map<String, Object>> calendarData = (List<Map<String, Object>>) params.get("calendars");
         boolean useFrontendData = subsidyData != null && !subsidyData.isEmpty();
+        log.info("=== 金额校验调试 === subsidyData size={}, useFrontendData={}, mainData.subsidyTotal={}",
+                subsidyData != null ? subsidyData.size() : "null", useFrontendData, mainData.get("subsidyTotal"));
 
         List<FkReimSubsidy> subsidies = new ArrayList<>();
         List<List<FkSubsidyCalendar>> allCalendars = new ArrayList<>();
@@ -573,6 +622,52 @@ public class FkReimMainServiceImpl extends ServiceImpl<FkReimMainMapper, FkReimM
         data.put("projectName", alloc.getProjectName());
         data.put("allocationRatio", alloc.getAllocationRatio());
         data.put("allocationAmount", alloc.getAllocationAmount());
+        return data;
+    }
+
+    /**
+     * 将补助对象转换为Map
+     */
+    private Map<String, Object> buildSubsidyMap(FkReimSubsidy sub) {
+        Map<String, Object> data = new HashMap<>();
+        data.put("travelerId", sub.getTravelerId());
+        data.put("travelerNo", sub.getTravelerNo());
+        data.put("travelerName", sub.getTravelerName());
+        data.put("departureDate", sub.getDepartureDate());
+        data.put("arrivalDate", sub.getArrivalDate());
+        data.put("subsidyDays", sub.getSubsidyDays());
+        data.put("departureCity", sub.getDepartureCity());
+        data.put("departureCityNo", sub.getDepartureCityNo());
+        data.put("arrivingCity", sub.getArrivingCity());
+        data.put("arrivingCityNo", sub.getArrivingCityNo());
+        data.put("applicationAmount", sub.getApplicationAmount());
+        data.put("subsidyAmount", sub.getSubsidyAmount());
+        data.put("mealAllowance", sub.getMealAllowance());
+        data.put("transportationAllowance", sub.getTransportationAllowance());
+        data.put("phoneAllowance", sub.getPhoneAllowance());
+        data.put("businessTypeId", sub.getBusinessTypeId());
+        data.put("businessTypeNo", sub.getBusinessTypeNo());
+        data.put("businessTypeName", sub.getBusinessTypeName());
+        return data;
+    }
+
+    /**
+     * 将日历对象转换为Map
+     */
+    private Map<String, Object> buildCalendarMap(FkSubsidyCalendar cal) {
+        Map<String, Object> data = new HashMap<>();
+        data.put("mainId", cal.getMainId());
+        data.put("travelDate", cal.getTravelDate());
+        data.put("travelDateWeek", cal.getTravelDateWeek());
+        data.put("subsidizedCities", cal.getSubsidizedCities());
+        data.put("subsidizedCityNumber", cal.getSubsidizedCityNumber());
+        data.put("standardMealExpensesAmount", cal.getStandardMealExpensesAmount());
+        data.put("standardTrafficAmount", cal.getStandardTrafficAmount());
+        data.put("standardCommunicationAmount", cal.getStandardCommunicationAmount());
+        data.put("mealExpensesAmount", cal.getMealExpensesAmount());
+        data.put("trafficAmount", cal.getTrafficAmount());
+        data.put("communicationAmount", cal.getCommunicationAmount());
+        data.put("isReimbursed", cal.getIsReimbursed());
         return data;
     }
 
