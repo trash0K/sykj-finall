@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.kjd.reimbursement.mapper.FkReimAllocationMapper">
+    <resultMap id="BaseResultMap" type="com.kjd.reimbursement.pojo.entity.FkReimAllocation">
+        <id column="id" property="id"/>
+        <result column="main_id" property="mainId"/>
+        <result column="attribution_id" property="attributionId"/>
+        <result column="attribution_name" property="attributionName"/>
+        <result column="project_id" property="projectId"/>
+        <result column="project_no" property="projectNo"/>
+        <result column="project_name" property="projectName"/>
+        <result column="allocation_ratio" property="allocationRatio"/>
+        <result column="allocation_amount" property="allocationAmount"/>
+    </resultMap>
+</mapper>
