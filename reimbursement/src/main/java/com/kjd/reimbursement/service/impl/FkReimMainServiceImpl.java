@@ -598,8 +598,17 @@ public class FkReimMainServiceImpl extends ServiceImpl<FkReimMainMapper, FkReimM
      */
     private FkReimAllocation parseAllocation(Map<String, Object> data) {
         FkReimAllocation alloc = new FkReimAllocation();
-        alloc.setAttributionId((String) data.get("attributionId"));
-        alloc.setAttributionName((String) data.get("attributionName"));
+        // 前端用 reimCompanyId/reimCompanyName，后端实体用 attributionId/attributionName
+        String attributionId = (String) data.get("attributionId");
+        if (!StringUtils.hasText(attributionId)) {
+            attributionId = (String) data.get("reimCompanyId");
+        }
+        String attributionName = (String) data.get("attributionName");
+        if (!StringUtils.hasText(attributionName)) {
+            attributionName = (String) data.get("reimCompanyName");
+        }
+        alloc.setAttributionId(attributionId);
+        alloc.setAttributionName(attributionName);
         alloc.setProjectId((String) data.get("projectId"));
         alloc.setProjectNo((String) data.get("projectNo"));
         alloc.setProjectName((String) data.get("projectName"));
@@ -615,8 +624,9 @@ public class FkReimMainServiceImpl extends ServiceImpl<FkReimMainMapper, FkReimM
         Map<String, Object> data = new HashMap<>();
         data.put("id", alloc.getId());
         data.put("mainId", alloc.getMainId());
-        data.put("attributionId", alloc.getAttributionId());
-        data.put("attributionName", alloc.getAttributionName());
+        // 前端用 reimCompanyId/reimCompanyName，后端实体用 attributionId/attributionName
+        data.put("reimCompanyId", alloc.getAttributionId());
+        data.put("reimCompanyName", alloc.getAttributionName());
         data.put("projectId", alloc.getProjectId());
         data.put("projectNo", alloc.getProjectNo());
         data.put("projectName", alloc.getProjectName());

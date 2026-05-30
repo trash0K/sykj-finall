@@ -807,9 +807,9 @@ const loadDetail = async () => {
     form.calendars = d.calendars || []
     form.allocations = (d.allocations || []).map(a => ({
       ...a,
-      reimCompanyId: a.reimCompanyId || '',
+      reimCompanyId: a.reimCompanyId || a.attributionId || '',
       reimCompanyNo: a.reimCompanyNo || '',
-      reimCompanyName: a.reimCompanyName || '',
+      reimCompanyName: a.reimCompanyName || a.attributionName || '',
       _ratioPercent: toPercent(a.allocationRatio)
     }))
     reimbSel.value = d.main.reimburserId || ''
