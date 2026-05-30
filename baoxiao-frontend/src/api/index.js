@@ -5,8 +5,7 @@ import {
   employees,
   businessTypes,
   cities,
-  projects,
-  costAttributions
+  projects
 } from '../mock/data'
 
 const api = axios.create({
@@ -74,6 +73,5 @@ export const dictApi = {
   employees: () => Promise.resolve(employees),
   businessTypes: () => Promise.resolve(businessTypes),
   cities: () => Promise.resolve(cities),
-  projects: () => Promise.resolve(projects),
-  attributions: () => Promise.resolve(costAttributions)
+  projects: () => Promise.resolve(projects)
 }

@@ -63,13 +63,6 @@ export const projects = [
   { projectId: '162664B8526BE002', projectNo: 'northEast', projectName: '东北客户定制化项目' }
 ]
 
-/** 费用归属（分摊表） */
-export const costAttributions = [
-  { attributionId: 'attr001', attributionName: '成本中心-管理类' },
-  { attributionId: 'attr002', attributionName: '成本中心-销售类' },
-  { attributionId: 'attr003', attributionName: '成本中心-研发类' }
-]
-
 const statusLabels = { '0': '草稿', '1': '已完成', '2': '已作废' }
 
 function makeListItem(i) {
@@ -176,8 +169,9 @@ export function getDefaultDetail(id) {
       {
         id: 'alloc1',
         mainId: id || '',
-        attributionId: 'attr001',
-        attributionName: '成本中心-管理类',
+        reimCompanyId: comp.reimCompanyId,
+        reimCompanyNo: comp.reimCompanyNo,
+        reimCompanyName: comp.reimCompanyName,
         projectId: '',
         projectNo: '',
         projectName: '',
