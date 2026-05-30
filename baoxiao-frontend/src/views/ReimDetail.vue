@@ -721,8 +721,7 @@ const checkDupItin = () => {
   return false
 }
 
-// 后端 saveReimbursementInternal 只消费 main + itineraries，
-// 补助/日历由后端按行程自动计算，allocations 后端无对应字段
+// 后端消费 main + itineraries + subsidies + calendars + allocations
 const buildPayload = () => ({
   main: { ...form.main },
   itineraries: form.itineraries.map(x => ({
@@ -736,6 +735,19 @@ const buildPayload = () => ({
     arrivingCity: x.arrivingCity,
     arrivingCityNo: x.arrivingCityNo,
     itineraryInstructions: x.itineraryInstructions
+  })),
+  subsidies: form.subsidies.map(x => ({ ...x })),
+  calendars: form.calendars.map(x => ({ ...x })),
+  allocations: form.allocations.map(x => ({
+    id: x.id,
+    mainId: x.mainId,
+    attributionId: x.attributionId,
+    attributionName: x.attributionName,
+    projectId: x.projectId,
+    projectNo: x.projectNo,
+    projectName: x.projectName,
+    allocationRatio: x.allocationRatio,
+    allocationAmount: x.allocationAmount
   }))
 })
 
