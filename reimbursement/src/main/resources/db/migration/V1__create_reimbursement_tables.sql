@@ -88,3 +88,18 @@ CREATE TABLE `fk_subsidy_calendar` (
   `is_reimbursed` varchar(32) DEFAULT NULL COMMENT '是否报销，控制复选框是否选中',
   PRIMARY KEY (`id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='补助日历表';
+
+-- 费用归属及分摊表
+DROP TABLE IF EXISTS `fk_reim_allocation`;
+CREATE TABLE `fk_reim_allocation` (
+                                      `id` varchar(32) NOT NULL COMMENT '主键ID',
+                                      `main_id` varchar(32) DEFAULT NULL COMMENT '主表ID，关联报销单主表主键ID',
+                                      `attribution_id` varchar(50) DEFAULT NULL COMMENT '费用归属ID',
+                                      `attribution_name` varchar(100) DEFAULT NULL COMMENT '费用归属名称',
+                                      `project_id` varchar(50) DEFAULT NULL COMMENT '项目ID',
+                                      `project_no` varchar(50) DEFAULT NULL COMMENT '项目编号',
+                                      `project_name` varchar(100) DEFAULT NULL COMMENT '项目名称',
+                                      `allocation_ratio` varchar(20) DEFAULT NULL COMMENT '分摊比例',
+                                      `allocation_amount` varchar(20) DEFAULT NULL COMMENT '分摊金额',
+                                      PRIMARY KEY (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='费用归属及分摊表';

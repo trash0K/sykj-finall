@@ -1,5 +1,6 @@
 package com.kjd.reimbursement.service.impl;
 
+import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.baomidou.mybatisplus.extension.service.IService;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
@@ -8,11 +9,13 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.kjd.reimbursement.exception.BusinessException;
 import com.kjd.reimbursement.exception.ErrorCode;
 import com.kjd.reimbursement.mapper.FkReimMainMapper;
+import com.kjd.reimbursement.pojo.entity.FkReimAllocation;
 import com.kjd.reimbursement.pojo.entity.FkReimItinerary;
 import com.kjd.reimbursement.pojo.entity.FkReimMain;
 import com.kjd.reimbursement.pojo.entity.FkReimSubsidy;
 import com.kjd.reimbursement.pojo.entity.FkSubsidyCalendar;
 import com.kjd.reimbursement.pojo.vo.PageResult;
+import com.kjd.reimbursement.service.FkReimAllocationService;
 import com.kjd.reimbursement.service.FkReimItineraryService;
 import com.kjd.reimbursement.service.FkReimMainService;
 import com.kjd.reimbursement.service.FkReimSubsidyService;
@@ -40,6 +43,8 @@ public class FkReimMainServiceImpl extends ServiceImpl<FkReimMainMapper, FkReimM
     private FkReimItineraryService fkReimItineraryService;
     @Autowired
     private FkReimSubsidyService fkReimSubsidyService;
+    @Autowired
+    private FkReimAllocationService fkReimAllocationService;
     @Autowired
     private FkSubsidyCalendarService fkSubsidyCalendarService;
     @Autowired
@@ -80,7 +85,7 @@ public class FkReimMainServiceImpl extends ServiceImpl<FkReimMainMapper, FkReimM
 
         // 2. 构建动态查询条件，根据传入参数进行模糊匹配
         Page<FkReimMain> result = this.page(pageParam,
-                lambdaQuery()
+                new LambdaQueryWrapper<FkReimMain>()
                         .like(StringUtils.hasText(id), FkReimMain::getId, id)
                         .like(StringUtils.hasText(reimbursementTitle), FkReimMain::getReimbursementTitle, reimbursementTitle)
                         .like(StringUtils.hasText(reimburserName), FkReimMain::getReimburserName, reimburserName)
@@ -127,26 +132,31 @@ public class FkReimMainServiceImpl extends ServiceImpl<FkReimMainMapper, FkReimM
                 .eq(FkReimItinerary::getMainId, id)
                 .list();
 
-        // 3. 查询关联的补助列表，并进一步查询每个补助对应的日历详情
+        // 3. 查询关联的补助列表
         List<FkReimSubsidy> subsidies = fkReimSubsidyService.lambdaQuery()
                 .eq(FkReimSubsidy::getMainId, id)
                 .list();
 
-        List<Map<String, Object>> subsidyDetails = new ArrayList<>();
+        // 查询所有关联的日历数据，平铺为前端需要的列表
+        List<FkSubsidyCalendar> calendars = new ArrayList<>();
         for (FkReimSubsidy subsidy : subsidies) {
-            Map<String, Object> detail = new HashMap<>();
-            detail.put("subsidy", subsidy);
-            detail.put("calendars", fkSubsidyCalendarService.lambdaQuery()
+            calendars.addAll(fkSubsidyCalendarService.lambdaQuery()
                     .eq(FkSubsidyCalendar::getMainId, subsidy.getId())
                     .list());
-            subsidyDetails.add(detail);
         }
 
-        // 4. 组装最终数据并返回
+        // 4. 查询费用归属及分摊数据
+        List<FkReimAllocation> allocations = fkReimAllocationService.lambdaQuery()
+                .eq(FkReimAllocation::getMainId, id)
+                .list();
+
+        // 5. 组装最终数据并返回
         Map<String, Object> data = new HashMap<>();
         data.put("main", fkReimMain);
         data.put("itineraries", itineraries);
-        data.put("subsidyDetails", subsidyDetails);
+        data.put("subsidies", subsidies);
+        data.put("calendars", calendars);
+        data.put("allocations", allocations);
         putJsonCache(cacheKey, data, 10, TimeUnit.MINUTES);
         return data;
     }
@@ -195,7 +205,12 @@ public class FkReimMainServiceImpl extends ServiceImpl<FkReimMainMapper, FkReimM
                 .eq(FkReimSubsidy::getMainId, id)
                 .remove();
 
-        // 4. 删除报销单主表记录
+        // 4. 删除关联的费用归属及分摊数据
+        fkReimAllocationService.lambdaUpdate()
+                .eq(FkReimAllocation::getMainId, id)
+                .remove();
+
+        // 5. 删除报销单主表记录
         this.removeById(id);
         // 5. 清除相关缓存
         evictReimbursementCaches(id);
@@ -236,6 +251,11 @@ public class FkReimMainServiceImpl extends ServiceImpl<FkReimMainMapper, FkReimM
         }
         fkReimSubsidyService.lambdaUpdate()
                 .eq(FkReimSubsidy::getMainId, mainId)
+                .remove();
+
+        // 清除旧的费用归属及分摊数据
+        fkReimAllocationService.lambdaUpdate()
+                .eq(FkReimAllocation::getMainId, mainId)
                 .remove();
 
         // 3. 保留原报销单ID和创建时间，重新保存主单和明细
@@ -315,24 +335,70 @@ public class FkReimMainServiceImpl extends ServiceImpl<FkReimMainMapper, FkReimM
         // 4. 校验行程是否重复
         validateItineraryDuplicate(itineraries);
 
-        // 5. 遍历行程，计算补助金额并生成补助日历
+        // 5. 解析补助及日历数据：优先使用前端传来的数据，复制场景下走服务端计算
+        List<Map<String, Object>> subsidyData = (List<Map<String, Object>>) params.get("subsidies");
+        List<Map<String, Object>> calendarData = (List<Map<String, Object>>) params.get("calendars");
+        boolean useFrontendData = subsidyData != null && !subsidyData.isEmpty();
+
         List<FkReimSubsidy> subsidies = new ArrayList<>();
         List<List<FkSubsidyCalendar>> allCalendars = new ArrayList<>();
         Set<String> subsidyIds = new HashSet<>();
         Set<String> calendarIds = new HashSet<>();
-        for (FkReimItinerary it : itineraries) {
-            Map<String, Object> subsidyResult = calculateSubsidy(it, fkReimMain.getBusinessTypeId(), fkReimMain.getBusinessTypeNo(), fkReimMain.getBusinessTypeName());
-            FkReimSubsidy subsidy = (FkReimSubsidy) subsidyResult.get("subsidy");
-            subsidy.setId(nextBufferedId(fkReimSubsidyService, subsidyIds));
-            List<FkSubsidyCalendar> calendars = (List<FkSubsidyCalendar>) subsidyResult.get("calendars");
-            for (FkSubsidyCalendar cal : calendars) {
-                cal.setId(nextBufferedId(fkSubsidyCalendarService, calendarIds));
+
+        if (useFrontendData) {
+            // 从前端数据解析补助，建立前端key到新ID的映射
+            Map<String, String> subsidyKeyToId = new HashMap<>();
+            for (Map<String, Object> item : subsidyData) {
+                FkReimSubsidy subsidy = parseSubsidy(item);
+                subsidy.setId(nextBufferedId(fkReimSubsidyService, subsidyIds));
+                subsidies.add(subsidy);
+                // 前端用 subsidy.id 或 travelerId+departureDate+arrivalDate 作为临时key
+                String frontendKey = (String) item.get("id");
+                if (!StringUtils.hasText(frontendKey)) {
+                    frontendKey = subsidy.getTravelerId() + subsidy.getDepartureDate() + subsidy.getArrivalDate();
+                }
+                subsidyKeyToId.put(frontendKey, subsidy.getId());
             }
-            subsidies.add(subsidy);
-            allCalendars.add(calendars);
+            // 解析日历并按键分组
+            Map<String, List<FkSubsidyCalendar>> calendarGroups = new LinkedHashMap<>();
+            if (calendarData != null) {
+                for (Map<String, Object> item : calendarData) {
+                    FkSubsidyCalendar cal = parseCalendar(item);
+                    cal.setId(nextBufferedId(fkSubsidyCalendarService, calendarIds));
+                    // calendar.mainId 是前端 subsidy key
+                    String calMainId = (String) item.get("mainId");
+                    calendarGroups.computeIfAbsent(calMainId, k -> new ArrayList<>()).add(cal);
+                }
+            }
+            // 将日历按 subsidy 顺序对齐
+            for (FkReimSubsidy subsidy : subsidies) {
+                // 用 subsidy 的原始 key 查找日历
+                String lookupKey = null;
+                for (Map.Entry<String, String> entry : subsidyKeyToId.entrySet()) {
+                    if (entry.getValue().equals(subsidy.getId())) {
+                        lookupKey = entry.getKey();
+                        break;
+                    }
+                }
+                List<FkSubsidyCalendar> grouped = calendarGroups.getOrDefault(lookupKey, new ArrayList<>());
+                allCalendars.add(grouped);
+            }
+        } else {
+            // 复制场景：服务端根据行程计算补助和日历
+            for (FkReimItinerary it : itineraries) {
+                Map<String, Object> subsidyResult = calculateSubsidy(it, fkReimMain.getBusinessTypeId(), fkReimMain.getBusinessTypeNo(), fkReimMain.getBusinessTypeName());
+                FkReimSubsidy subsidy = (FkReimSubsidy) subsidyResult.get("subsidy");
+                subsidy.setId(nextBufferedId(fkReimSubsidyService, subsidyIds));
+                List<FkSubsidyCalendar> calendars = (List<FkSubsidyCalendar>) subsidyResult.get("calendars");
+                for (FkSubsidyCalendar cal : calendars) {
+                    cal.setId(nextBufferedId(fkSubsidyCalendarService, calendarIds));
+                }
+                subsidies.add(subsidy);
+                allCalendars.add(calendars);
+            }
         }
 
-        // 6. 汇总所有行程的补助金额
+        // 6. 汇总所有补助金额
         BigDecimal totalSubsidy = BigDecimal.ZERO;
         BigDecimal totalMeal = BigDecimal.ZERO;
         BigDecimal totalTraffic = BigDecimal.ZERO;
@@ -344,11 +410,13 @@ public class FkReimMainServiceImpl extends ServiceImpl<FkReimMainMapper, FkReimM
             totalComm = totalComm.add(new BigDecimal(subsidy.getPhoneAllowance()));
         }
 
-        // 7. 校验前端传入金额与后端计算金额是否一致
-        validateAmount(mainData, "subsidyTotal", "补助总金额", totalSubsidy);
-        validateAmount(mainData, "mealAllowance", "餐费补助", totalMeal);
-        validateAmount(mainData, "transportationAllowance", "交通补助", totalTraffic);
-        validateAmount(mainData, "phoneAllowance", "通讯补助", totalComm);
+        // 7. 校验前端传入金额与后端计算金额是否一致（仅复制场景需要校验，前端数据场景金额已确定）
+        if (!useFrontendData) {
+            validateAmount(mainData, "subsidyTotal", "补助总金额", totalSubsidy);
+            validateAmount(mainData, "mealAllowance", "餐费补助", totalMeal);
+            validateAmount(mainData, "transportationAllowance", "交通补助", totalTraffic);
+            validateAmount(mainData, "phoneAllowance", "通讯补助", totalComm);
+        }
 
         // 8. 将汇总金额设置到主单对象
         fkReimMain.setSubsidyTotal(totalSubsidy.toPlainString());
@@ -383,6 +451,20 @@ public class FkReimMainServiceImpl extends ServiceImpl<FkReimMainMapper, FkReimM
             if (!calendars.isEmpty()) {
                 fkSubsidyCalendarService.saveBatch(calendars);
             }
+        }
+
+        // 12. 解析并保存费用归属及分摊数据
+        List<Map<String, Object>> allocData = (List<Map<String, Object>>) params.get("allocations");
+        if (allocData != null && !allocData.isEmpty()) {
+            Set<String> allocIds = new HashSet<>();
+            List<FkReimAllocation> allocations = new ArrayList<>();
+            for (Map<String, Object> item : allocData) {
+                FkReimAllocation alloc = parseAllocation(item);
+                alloc.setId(nextBufferedId(fkReimAllocationService, allocIds));
+                alloc.setMainId(fkReimMain.getId());
+                allocations.add(alloc);
+            }
+            fkReimAllocationService.saveBatch(allocations);
         }
 
         // 12. 返回报销单ID
@@ -434,6 +516,83 @@ public class FkReimMainServiceImpl extends ServiceImpl<FkReimMainMapper, FkReimM
         it.setItineraryInstructions((String) data.get("itineraryInstructions"));
         // 3. 返回行程对象
         return it;
+    }
+
+    /**
+     * 解析前端传来的补助数据
+     */
+    private FkReimSubsidy parseSubsidy(Map<String, Object> data) {
+        FkReimSubsidy subsidy = new FkReimSubsidy();
+        subsidy.setTravelerId((String) data.get("travelerId"));
+        subsidy.setTravelerNo((String) data.get("travelerNo"));
+        subsidy.setTravelerName((String) data.get("travelerName"));
+        subsidy.setDepartureDate((String) data.get("departureDate"));
+        subsidy.setArrivalDate((String) data.get("arrivalDate"));
+        subsidy.setSubsidyDays((String) data.get("subsidyDays"));
+        subsidy.setDepartureCity((String) data.get("departureCity"));
+        subsidy.setDepartureCityNo((String) data.get("departureCityNo"));
+        subsidy.setArrivingCity((String) data.get("arrivingCity"));
+        subsidy.setArrivingCityNo((String) data.get("arrivingCityNo"));
+        subsidy.setApplicationAmount(Objects.toString(data.get("applicationAmount"), "0"));
+        subsidy.setSubsidyAmount(Objects.toString(data.get("subsidyAmount"), "0"));
+        subsidy.setMealAllowance(Objects.toString(data.get("mealAllowance"), "0"));
+        subsidy.setTransportationAllowance(Objects.toString(data.get("transportationAllowance"), "0"));
+        subsidy.setPhoneAllowance(Objects.toString(data.get("phoneAllowance"), "0"));
+        subsidy.setBusinessTypeId((String) data.get("businessTypeId"));
+        subsidy.setBusinessTypeNo((String) data.get("businessTypeNo"));
+        subsidy.setBusinessTypeName((String) data.get("businessTypeName"));
+        return subsidy;
+    }
+
+    /**
+     * 解析前端传来的费用归属分摊数据
+     */
+    private FkReimAllocation parseAllocation(Map<String, Object> data) {
+        FkReimAllocation alloc = new FkReimAllocation();
+        alloc.setAttributionId((String) data.get("attributionId"));
+        alloc.setAttributionName((String) data.get("attributionName"));
+        alloc.setProjectId((String) data.get("projectId"));
+        alloc.setProjectNo((String) data.get("projectNo"));
+        alloc.setProjectName((String) data.get("projectName"));
+        alloc.setAllocationRatio(Objects.toString(data.get("allocationRatio"), "0"));
+        alloc.setAllocationAmount(Objects.toString(data.get("allocationAmount"), "0"));
+        return alloc;
+    }
+
+    /**
+     * 将分摊对象转换为Map
+     */
+    private Map<String, Object> buildAllocationMap(FkReimAllocation alloc) {
+        Map<String, Object> data = new HashMap<>();
+        data.put("id", alloc.getId());
+        data.put("mainId", alloc.getMainId());
+        data.put("attributionId", alloc.getAttributionId());
+        data.put("attributionName", alloc.getAttributionName());
+        data.put("projectId", alloc.getProjectId());
+        data.put("projectNo", alloc.getProjectNo());
+        data.put("projectName", alloc.getProjectName());
+        data.put("allocationRatio", alloc.getAllocationRatio());
+        data.put("allocationAmount", alloc.getAllocationAmount());
+        return data;
+    }
+
+    /**
+     * 解析前端传来的补助日历数据
+     */
+    private FkSubsidyCalendar parseCalendar(Map<String, Object> data) {
+        FkSubsidyCalendar cal = new FkSubsidyCalendar();
+        cal.setTravelDate((String) data.get("travelDate"));
+        cal.setTravelDateWeek((String) data.get("travelDateWeek"));
+        cal.setSubsidizedCities((String) data.get("subsidizedCities"));
+        cal.setSubsidizedCityNumber((String) data.get("subsidizedCityNumber"));
+        cal.setStandardMealExpensesAmount(Objects.toString(data.get("standardMealExpensesAmount"), "0"));
+        cal.setStandardTrafficAmount(Objects.toString(data.get("standardTrafficAmount"), "0"));
+        cal.setStandardCommunicationAmount(Objects.toString(data.get("standardCommunicationAmount"), "0"));
+        cal.setMealExpensesAmount(Objects.toString(data.get("mealExpensesAmount"), "0"));
+        cal.setTrafficAmount(Objects.toString(data.get("trafficAmount"), "0"));
+        cal.setCommunicationAmount(Objects.toString(data.get("communicationAmount"), "0"));
+        cal.setIsReimbursed(Objects.toString(data.get("isReimbursed"), "1"));
+        return cal;
     }
 
     /**

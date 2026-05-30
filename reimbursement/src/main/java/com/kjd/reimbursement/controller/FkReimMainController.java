@@ -5,11 +5,13 @@ import com.kjd.reimbursement.exception.ErrorCode;
 import com.kjd.reimbursement.pojo.vo.PageResult;
 import com.kjd.reimbursement.pojo.vo.Result;
 import com.kjd.reimbursement.service.FkReimMainService;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.Map;
 
+@Slf4j
 @RestController
 @RequestMapping("/reimbursement")
 public class FkReimMainController {
@@ -31,6 +33,7 @@ public class FkReimMainController {
             @RequestParam(required = false) String reimCompanyName,
             @RequestParam(required = false) String businessTripReason,
             @RequestParam(required = false) String businessTypeName) {
+        log.info("查询报销单列表: page={}, size={}", page, size);
         PageResult result = fkReimMainService.getReimbursementList(page, size, id, reimbursementTitle, reimburserName, reimDepartmentName, reimCompanyName, businessTripReason, businessTypeName);
         return Result.success(result);
     }
@@ -40,6 +43,7 @@ public class FkReimMainController {
      */
     @GetMapping("/{id}")
     public Result<Map<String, Object>> detail(@PathVariable String id) {
+        log.info("查询报销单详情: id={}", id);
         try {
             Map<String, Object> data = fkReimMainService.getReimbursementDetail(id);
             return Result.success(data);
@@ -53,6 +57,7 @@ public class FkReimMainController {
      */
     @PostMapping("/save")
     public Result<String> save(@RequestBody Map<String, Object> params) {
+        log.info("保存报销单");
         try {
             String id = fkReimMainService.saveReimbursement(params);
             return Result.success(id);
@@ -66,6 +71,7 @@ public class FkReimMainController {
      */
     @DeleteMapping("/{id}")
     public Result<String> delete(@PathVariable String id) {
+        log.info("删除报销单: id={}", id);
         try {
             fkReimMainService.deleteReimbursement(id);
             return Result.success();
@@ -79,6 +85,7 @@ public class FkReimMainController {
      */
     @PutMapping("/update")
     public Result<String> update(@RequestBody Map<String, Object> params) {
+        log.info("更新报销单");
         try {
             String id = fkReimMainService.updateReimbursement(params);
             return Result.success(id);
@@ -92,6 +99,7 @@ public class FkReimMainController {
      */
     @PostMapping("/{id}/copy")
     public Result<String> copy(@PathVariable String id) {
+        log.info("复制报销单: id={}", id);
         try {
             String newId = fkReimMainService.copyReimbursement(id);
             return Result.success(newId);
@@ -102,8 +110,10 @@ public class FkReimMainController {
 
     private <T> Result<T> handleException(RuntimeException e) {
         if (e instanceof BusinessException businessException) {
+            log.warn("业务异常: code={}, msg={}", businessException.getCode(), businessException.getMessage());
             return Result.error(businessException.getCode(), businessException.getMessage());
         }
+        log.error("系统异常", e);
         return Result.error(ErrorCode.SYSTEM_ERROR.getCode(), e.getMessage());
     }
 }
