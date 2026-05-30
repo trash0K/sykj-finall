@@ -158,8 +158,8 @@
             <el-table-column min-width="200">
               <template #header><span class="req">费用归属</span></template>
               <template #default="{ row }">
-                <el-select v-model="row.attributionId" :disabled="readonly" placeholder="请选择" filterable clearable style="width:100%" @change="v => onAttribChange(v, row)">
-                  <el-option v-for="a in costAttributions" :key="a.attributionId" :label="a.attributionName" :value="a.attributionId" />
+                <el-select v-model="row.reimCompanyId" :disabled="readonly" placeholder="请选择" filterable clearable style="width:100%" @change="v => onAllocCompanyChange(v, row)">
+                  <el-option v-for="c in companies" :key="c.reimCompanyId" :label="c.reimCompanyName" :value="c.reimCompanyId" />
                 </el-select>
               </template>
             </el-table-column>
@@ -527,8 +527,9 @@ const initAlloc = () => {
     form.allocations.push({
       id: '',
       mainId: '',
-      attributionId: 'attr001',
-      attributionName: '成本中心-管理类',
+      reimCompanyId: '',
+      reimCompanyNo: '',
+      reimCompanyName: '',
       projectId: '',
       projectNo: '',
       projectName: '',
@@ -543,8 +544,9 @@ const addAlloc = () => {
   form.allocations.push({
     id: '',
     mainId: '',
-    attributionId: '',
-    attributionName: '',
+    reimCompanyId: '',
+    reimCompanyNo: '',
+    reimCompanyName: '',
     projectId: '',
     projectNo: '',
     projectName: '',
@@ -682,10 +684,16 @@ const onBizChange = (v) => {
     form.main.businessTypeName = bt.businessTypeName
   }
 }
-const costAttributions = ref([])
-const onAttribChange = (v, row) => {
-  const a = costAttributions.value.find(x => x.attributionId === v)
-  if (a) row.attributionName = a.attributionName
+const onAllocCompanyChange = (v, row) => {
+  const c = companies.value.find(x => x.reimCompanyId === v)
+  if (c) {
+    row.reimCompanyId = c.reimCompanyId
+    row.reimCompanyNo = c.reimCompanyNo
+    row.reimCompanyName = c.reimCompanyName
+  } else {
+    row.reimCompanyNo = ''
+    row.reimCompanyName = ''
+  }
 }
 const onProjChange = (v, row) => {
   const p = projects.value.find(x => x.projectId === v)
@@ -706,7 +714,7 @@ const validate = () => {
   if (!m.businessTypeId) { ElMessage.warning('请选择业务类型'); return false }
   if (!form.itineraries.length) { ElMessage.warning('请补录至少一条行程'); return false }
   for (const a of form.allocations) {
-    if (!a.attributionId) { ElMessage.warning('请选择费用归属'); return false }
+    if (!a.reimCompanyId) { ElMessage.warning('请选择费用归属'); return false }
   }
   return true
 }
@@ -741,8 +749,9 @@ const buildPayload = () => ({
   allocations: form.allocations.map(x => ({
     id: x.id,
     mainId: x.mainId,
-    attributionId: x.attributionId,
-    attributionName: x.attributionName,
+    reimCompanyId: x.reimCompanyId,
+    reimCompanyNo: x.reimCompanyNo,
+    reimCompanyName: x.reimCompanyName,
     projectId: x.projectId,
     projectNo: x.projectNo,
     projectName: x.projectName,
@@ -798,8 +807,9 @@ const loadDetail = async () => {
     form.calendars = d.calendars || []
     form.allocations = (d.allocations || []).map(a => ({
       ...a,
-      attributionId: a.attributionId || 'attr001',
-      attributionName: a.attributionName || a.reimCompanyName || '成本中心-管理类',
+      reimCompanyId: a.reimCompanyId || '',
+      reimCompanyNo: a.reimCompanyNo || '',
+      reimCompanyName: a.reimCompanyName || '',
       _ratioPercent: toPercent(a.allocationRatio)
     }))
     reimbSel.value = d.main.reimburserId || ''
@@ -812,14 +822,13 @@ const loadDetail = async () => {
 }
 
 onMounted(async () => {
-  const [comp, dept, emp, biz, cit, proj, attrs] = await Promise.all([
+  const [comp, dept, emp, biz, cit, proj] = await Promise.all([
     dictApi.companies(),
     dictApi.departments(),
     dictApi.employees(),
     dictApi.businessTypes(),
     dictApi.cities(),
-    dictApi.projects(),
-    dictApi.attributions()
+    dictApi.projects()
   ])
   companies.value = comp
   departments.value = dept
@@ -827,7 +836,6 @@ onMounted(async () => {
   bizTree.value = buildTree(biz)
   cities.value = cit
   projects.value = proj
-  costAttributions.value = attrs
   await loadDetail()
 })
 </script>
