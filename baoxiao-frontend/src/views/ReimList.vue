@@ -58,8 +58,8 @@
           <el-table-column label="操作" width="140" align="center" fixed="left">
             <template #default="{ row }">
               <div class="op-icons">
-                <el-tooltip content="编辑" placement="top">
-                  <el-button link type="primary" @click="handleEdit(row)">
+                <el-tooltip :content="row.docStatus === '0' ? '编辑' : '仅草稿状态可编辑'" placement="top">
+                  <el-button link :type="row.docStatus === '0' ? 'primary' : 'info'" :disabled="row.docStatus !== '0'" @click="handleEdit(row)">
                     <el-icon :size="16"><Edit /></el-icon>
                   </el-button>
                 </el-tooltip>
