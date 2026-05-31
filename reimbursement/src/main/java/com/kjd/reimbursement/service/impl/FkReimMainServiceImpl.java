@@ -309,8 +309,10 @@ public class FkReimMainServiceImpl extends ServiceImpl<FkReimMainMapper, FkReimM
                 .list();
 
         // 6. 构建复制参数，将源数据转换为Map结构
+        Map<String, Object> mainMap = buildMainMap(source);
+        mainMap.put("docStatus", "0"); // 复制的报销单默认为草稿状态
         Map<String, Object> params = new HashMap<>();
-        params.put("main", buildMainMap(source));
+        params.put("main", mainMap);
 
         List<Map<String, Object>> itineraries = new ArrayList<>();
         for (FkReimItinerary sourceItinerary : sourceItineraries) {
