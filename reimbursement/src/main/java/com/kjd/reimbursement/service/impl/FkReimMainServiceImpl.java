@@ -21,6 +21,7 @@ import com.kjd.reimbursement.service.FkReimMainService;
 import com.kjd.reimbursement.service.FkReimSubsidyService;
 import com.kjd.reimbursement.service.FkSubsidyCalendarService;
 import com.kjd.reimbursement.util.IdGenerator;
+import org.springframework.beans.BeanUtils;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
@@ -274,28 +275,31 @@ public class FkReimMainServiceImpl extends ServiceImpl<FkReimMainMapper, FkReimM
     }
 
     /**
-     * 复制报销单
+     * 复制报销单。
+     *
+     * 复制的目标是一张新的草稿单：主单和所有子表都生成新ID，金额、日历明细、勾选状态沿用源单。
+     * 这里直接复制数据库实体并落库，避免先转Map再走新增解析流程。
      */
     @Override
     @Transactional
     public String copyReimbursement(String id) {
-        // 1. 查询源报销单是否存在
+        // 1. 先查询报销主单
         FkReimMain source = this.getById(id);
         if (source == null) {
             throw new BusinessException(ErrorCode.REIMBURSEMENT_NOT_FOUND);
         }
 
-        // 2. 查询源报销单的所有行程
+        // 2. 查询主单下的所有行程
         List<FkReimItinerary> sourceItineraries = fkReimItineraryService.lambdaQuery()
                 .eq(FkReimItinerary::getMainId, id)
                 .list();
 
-        // 3. 查询源报销单的补助数据（保留原始勾选金额）
+        //查询每一段行程的天数、默认总餐补交通补助通讯补助
         List<FkReimSubsidy> sourceSubsidies = fkReimSubsidyService.lambdaQuery()
                 .eq(FkReimSubsidy::getMainId, id)
                 .list();
 
-        // 4. 查询源报销单的日历数据
+        // 3. 根据补助表id查询每一段行程的具体补助：包括行程中每一天的补助情况
         List<FkSubsidyCalendar> allSourceCalendars = new ArrayList<>();
         for (FkReimSubsidy sub : sourceSubsidies) {
             allSourceCalendars.addAll(fkSubsidyCalendarService.lambdaQuery()
@@ -303,51 +307,57 @@ public class FkReimMainServiceImpl extends ServiceImpl<FkReimMainMapper, FkReimM
                     .list());
         }
 
-        // 5. 查询源报销单的费用归属及分摊数据
+        //查询总报销金额中各公司的分摊情况
         List<FkReimAllocation> sourceAllocations = fkReimAllocationService.lambdaQuery()
                 .eq(FkReimAllocation::getMainId, id)
                 .list();
 
-        // 6. 构建复制参数，将源数据转换为Map结构
-        Map<String, Object> mainMap = buildMainMap(source);
-        mainMap.put("docStatus", "0"); // 复制的报销单默认为草稿状态
-        Map<String, Object> params = new HashMap<>();
-        params.put("main", mainMap);
+        // 4. 生成新主单ID，并把主单重置为一张新的草稿单。
+        String newMainId = idGenerator.nextId(this);
+        FkReimMain newMain = copyMain(source, newMainId);
 
-        List<Map<String, Object>> itineraries = new ArrayList<>();
+        // 5. 行程只需要换新ID，并把mainId改成新主单ID。
+        Set<String> itineraryIds = new HashSet<>();
+        List<FkReimItinerary> copiedItineraries = new ArrayList<>();
         for (FkReimItinerary sourceItinerary : sourceItineraries) {
-            itineraries.add(buildItineraryMap(sourceItinerary));
+            String newItineraryId = nextBufferedId(fkReimItineraryService, itineraryIds);
+            copiedItineraries.add(copyItinerary(sourceItinerary, newMainId, newItineraryId));
         }
-        params.put("itineraries", itineraries);
 
-        // 补助数据：用源记录的key作为临时mainId，保证日历能正确关联
-        List<Map<String, Object>> subsidies = new ArrayList<>();
-        for (FkReimSubsidy sub : sourceSubsidies) {
-            Map<String, Object> subMap = buildSubsidyMap(sub);
-            // 用源subsidy的ID作为临时key，日历会引用这个key
-            subMap.put("id", sub.getId());
-            subsidies.add(subMap);
+        // 6. 补助也换新ID、挂到新主单，同时记录“源补助ID -> 新补助ID”映射。
+        Set<String> subsidyIds = new HashSet<>();
+        Map<String, String> subsidyIdMap = new HashMap<>();
+        List<FkReimSubsidy> copiedSubsidies = new ArrayList<>();
+        for (FkReimSubsidy sourceSubsidy : sourceSubsidies) {
+            String newSubsidyId = nextBufferedId(fkReimSubsidyService, subsidyIds);
+            subsidyIdMap.put(sourceSubsidy.getId(), newSubsidyId);
+            copiedSubsidies.add(copySubsidy(sourceSubsidy, newMainId, newSubsidyId));
         }
-        params.put("subsidies", subsidies);
 
-        List<Map<String, Object>> calendars = new ArrayList<>();
-        for (FkSubsidyCalendar cal : allSourceCalendars) {
-            calendars.add(buildCalendarMap(cal));
+        // 7. 日历挂在补助下面，复制时必须把mainId改成对应的新补助ID。
+        Set<String> calendarIds = new HashSet<>();
+        List<FkSubsidyCalendar> copiedCalendars = new ArrayList<>();
+        for (FkSubsidyCalendar sourceCalendar : allSourceCalendars) {
+            String newSubsidyId = subsidyIdMap.get(sourceCalendar.getMainId());
+            if (!StringUtils.hasText(newSubsidyId)) {
+                throw new BusinessException(ErrorCode.PARAM_ERROR, "补助日历关联补助不存在");
+            }
+            String newCalendarId = nextBufferedId(fkSubsidyCalendarService, calendarIds);
+            copiedCalendars.add(copyCalendar(sourceCalendar, newSubsidyId, newCalendarId));
         }
-        params.put("calendars", calendars);
 
-        List<Map<String, Object>> allocations = new ArrayList<>();
-        for (FkReimAllocation alloc : sourceAllocations) {
-            allocations.add(buildAllocationMap(alloc));
+        // 8. 费用分摊只需要换新ID，并把mainId改成新主单ID。
+        Set<String> allocationIds = new HashSet<>();
+        List<FkReimAllocation> copiedAllocations = new ArrayList<>();
+        for (FkReimAllocation sourceAllocation : sourceAllocations) {
+            String newAllocationId = nextBufferedId(fkReimAllocationService, allocationIds);
+            copiedAllocations.add(copyAllocation(sourceAllocation, newMainId, newAllocationId));
         }
-        params.put("allocations", allocations);
 
-        // 7. 调用内部保存方法创建新报销单（生成新ID）
-        String newId = saveReimbursementInternal(params, null, null);
-        // 8. 清除相关缓存
-        evictReimbursementCaches(newId);
-        // 9. 返回新报销单ID
-        return newId;
+        // 9. 同一个事务内保存整张复制单，并清理列表/详情缓存。
+        saveCopiedReimbursementEntities(newMain, copiedItineraries, copiedSubsidies, copiedCalendars, copiedAllocations);
+        evictReimbursementCaches(newMainId);
+        return newMainId;
     }
 
     /**
@@ -656,70 +666,6 @@ public class FkReimMainServiceImpl extends ServiceImpl<FkReimMainMapper, FkReimM
     }
 
     /**
-     * 将分摊对象转换为Map
-     */
-    private Map<String, Object> buildAllocationMap(FkReimAllocation alloc) {
-        Map<String, Object> data = new HashMap<>();
-        data.put("id", alloc.getId());
-        data.put("mainId", alloc.getMainId());
-        // 前端用 reimCompanyId/reimCompanyName，后端实体用 attributionId/attributionName
-        data.put("reimCompanyId", alloc.getAttributionId());
-        data.put("reimCompanyName", alloc.getAttributionName());
-        data.put("projectId", alloc.getProjectId());
-        data.put("projectNo", alloc.getProjectNo());
-        data.put("projectName", alloc.getProjectName());
-        data.put("allocationRatio", alloc.getAllocationRatio());
-        data.put("allocationAmount", alloc.getAllocationAmount());
-        return data;
-    }
-
-    /**
-     * 将补助对象转换为Map
-     */
-    private Map<String, Object> buildSubsidyMap(FkReimSubsidy sub) {
-        Map<String, Object> data = new HashMap<>();
-        data.put("travelerId", sub.getTravelerId());
-        data.put("travelerNo", sub.getTravelerNo());
-        data.put("travelerName", sub.getTravelerName());
-        data.put("departureDate", sub.getDepartureDate());
-        data.put("arrivalDate", sub.getArrivalDate());
-        data.put("subsidyDays", sub.getSubsidyDays());
-        data.put("departureCity", sub.getDepartureCity());
-        data.put("departureCityNo", sub.getDepartureCityNo());
-        data.put("arrivingCity", sub.getArrivingCity());
-        data.put("arrivingCityNo", sub.getArrivingCityNo());
-        data.put("applicationAmount", sub.getApplicationAmount());
-        data.put("subsidyAmount", sub.getSubsidyAmount());
-        data.put("mealAllowance", sub.getMealAllowance());
-        data.put("transportationAllowance", sub.getTransportationAllowance());
-        data.put("phoneAllowance", sub.getPhoneAllowance());
-        data.put("businessTypeId", sub.getBusinessTypeId());
-        data.put("businessTypeNo", sub.getBusinessTypeNo());
-        data.put("businessTypeName", sub.getBusinessTypeName());
-        return data;
-    }
-
-    /**
-     * 将日历对象转换为Map
-     */
-    private Map<String, Object> buildCalendarMap(FkSubsidyCalendar cal) {
-        Map<String, Object> data = new HashMap<>();
-        data.put("mainId", cal.getMainId());
-        data.put("travelDate", cal.getTravelDate());
-        data.put("travelDateWeek", cal.getTravelDateWeek());
-        data.put("subsidizedCities", cal.getSubsidizedCities());
-        data.put("subsidizedCityNumber", cal.getSubsidizedCityNumber());
-        data.put("standardMealExpensesAmount", cal.getStandardMealExpensesAmount());
-        data.put("standardTrafficAmount", cal.getStandardTrafficAmount());
-        data.put("standardCommunicationAmount", cal.getStandardCommunicationAmount());
-        data.put("mealExpensesAmount", cal.getMealExpensesAmount());
-        data.put("trafficAmount", cal.getTrafficAmount());
-        data.put("communicationAmount", cal.getCommunicationAmount());
-        data.put("isReimbursed", cal.getIsReimbursed());
-        return data;
-    }
-
-    /**
      * 解析前端传来的补助日历数据
      */
     private FkSubsidyCalendar parseCalendar(Map<String, Object> data) {
@@ -908,56 +854,82 @@ public class FkReimMainServiceImpl extends ServiceImpl<FkReimMainMapper, FkReimM
     }
 
     /**
-     * 将主单对象转换为Map
+     * 复制主单：保留源单业务字段，重置为新的草稿单。
      */
-    private Map<String, Object> buildMainMap(FkReimMain main) {
-        // 1. 创建Map对象
-        Map<String, Object> data = new HashMap<>();
-        // 2. 将主单字段逐个放入Map
-        data.put("reimbursementTitle", main.getReimbursementTitle());
-        data.put("reimburserId", main.getReimburserId());
-        data.put("reimburserNo", main.getReimburserNo());
-        data.put("reimburserName", main.getReimburserName());
-        data.put("reimDepartmentId", main.getReimDepartmentId());
-        data.put("reimDepartmentNo", main.getReimDepartmentNo());
-        data.put("reimDepartmentName", main.getReimDepartmentName());
-        data.put("reimCompanyId", main.getReimCompanyId());
-        data.put("reimCompanyNo", main.getReimCompanyNo());
-        data.put("reimCompanyName", main.getReimCompanyName());
-        data.put("businessTypeId", main.getBusinessTypeId());
-        data.put("businessTypeNo", main.getBusinessTypeNo());
-        data.put("businessTypeName", main.getBusinessTypeName());
-        data.put("businessTripReason", main.getBusinessTripReason());
-        data.put("subsidyTotal", main.getSubsidyTotal());
-        data.put("mealAllowance", main.getMealAllowance());
-        data.put("transportationAllowance", main.getTransportationAllowance());
-        data.put("phoneAllowance", main.getPhoneAllowance());
-        data.put("docStatus", main.getDocStatus());
-        data.put("docType", main.getDocType());
-        data.put("remarks", main.getRemarks());
-        // 3. 返回Map
-        return data;
+    private FkReimMain copyMain(FkReimMain source, String newId) {
+        FkReimMain target = new FkReimMain();
+        BeanUtils.copyProperties(source, target);
+        target.setId(newId);
+        target.setCreationTime(LocalDate.now().format(DateTimeFormatter.ISO_LOCAL_DATE));
+        target.setDocStatus("0");
+        return target;
     }
 
     /**
-     * 将行程对象转换为Map
+     * 复制行程：行程属于主单，mainId指向新主单ID。
      */
-    private Map<String, Object> buildItineraryMap(FkReimItinerary itinerary) {
-        // 1. 创建Map对象
-        Map<String, Object> data = new HashMap<>();
-        // 2. 将行程字段逐个放入Map
-        data.put("travelerId", itinerary.getTravelerId());
-        data.put("travelerNo", itinerary.getTravelerNo());
-        data.put("travelerName", itinerary.getTravelerName());
-        data.put("departureDate", itinerary.getDepartureDate());
-        data.put("arrivalDate", itinerary.getArrivalDate());
-        data.put("departureCity", itinerary.getDepartureCity());
-        data.put("departureCityNo", itinerary.getDepartureCityNo());
-        data.put("arrivingCity", itinerary.getArrivingCity());
-        data.put("arrivingCityNo", itinerary.getArrivingCityNo());
-        data.put("itineraryInstructions", itinerary.getItineraryInstructions());
-        // 3. 返回Map
-        return data;
+    private FkReimItinerary copyItinerary(FkReimItinerary source, String newMainId, String newId) {
+        FkReimItinerary target = new FkReimItinerary();
+        BeanUtils.copyProperties(source, target);
+        target.setId(newId);
+        target.setMainId(newMainId);
+        return target;
+    }
+
+    /**
+     * 复制补助：补助属于主单，金额沿用源单。
+     */
+    private FkReimSubsidy copySubsidy(FkReimSubsidy source, String newMainId, String newId) {
+        FkReimSubsidy target = new FkReimSubsidy();
+        BeanUtils.copyProperties(source, target);
+        target.setId(newId);
+        target.setMainId(newMainId);
+        return target;
+    }
+
+    /**
+     * 复制补助日历：日历属于补助，mainId指向新补助ID。
+     */
+    private FkSubsidyCalendar copyCalendar(FkSubsidyCalendar source, String newSubsidyId, String newId) {
+        FkSubsidyCalendar target = new FkSubsidyCalendar();
+        BeanUtils.copyProperties(source, target);
+        target.setId(newId);
+        target.setMainId(newSubsidyId);
+        return target;
+    }
+
+    /**
+     * 复制分摊：分摊属于主单，mainId指向新主单ID。
+     */
+    private FkReimAllocation copyAllocation(FkReimAllocation source, String newMainId, String newId) {
+        FkReimAllocation target = new FkReimAllocation();
+        BeanUtils.copyProperties(source, target);
+        target.setId(newId);
+        target.setMainId(newMainId);
+        return target;
+    }
+
+    /**
+     * 保存复制出来的整张报销单。外层copyReimbursement带事务，任一保存失败都会回滚。
+     */
+    private void saveCopiedReimbursementEntities(FkReimMain main,
+                                                 List<FkReimItinerary> itineraries,
+                                                 List<FkReimSubsidy> subsidies,
+                                                 List<FkSubsidyCalendar> calendars,
+                                                 List<FkReimAllocation> allocations) {
+        this.save(main);
+        if (!itineraries.isEmpty()) {
+            fkReimItineraryService.saveBatch(itineraries);
+        }
+        if (!subsidies.isEmpty()) {
+            fkReimSubsidyService.saveBatch(subsidies);
+        }
+        if (!calendars.isEmpty()) {
+            fkSubsidyCalendarService.saveBatch(calendars);
+        }
+        if (!allocations.isEmpty()) {
+            fkReimAllocationService.saveBatch(allocations);
+        }
     }
 
     /**
